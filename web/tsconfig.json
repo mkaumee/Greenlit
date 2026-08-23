@@ -5,7 +5,7 @@
     "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["vitest/globals", "node"],
+    "types": ["vitest/globals", "node", "vite/client"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
