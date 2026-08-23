@@ -47,13 +47,18 @@ Budget half an hour for the first run, most of it waiting for the first build.
 
   `scripts/gcp_setup.sh` now does this, so a project set up from scratch is
   fine. For one that predates that, `firebase projects:addfirebase
-  your-project-id` adds it. If that fails, the usual cause is the CLI token
-  lacking the `firebase` OAuth scope — Cloud Shell's auto auth carries
-  `cloud-platform` but not that one — so `firebase login --reauth` first.
-  The console does the same job either way:
-  [console.firebase.google.com](https://console.firebase.google.com) → **Add
-  project** → pick the **existing** project from the dropdown rather than
-  creating a new one.
+  your-project-id` adds it — and if it refuses, **read the message it prints
+  rather than guessing**. The script relays Google's own error for the same
+  reason.
+
+  The CLI cannot always finish this job. Firebase's terms of service have to be
+  accepted once per account and no command-line tool can present them, so
+  `addfirebase` can fail on an account with full owner rights and a correctly
+  scoped token, saying nothing useful about why. When that happens, stop
+  fighting it: [console.firebase.google.com](https://console.firebase.google.com)
+  → **Add project** → pick the **existing** project from the dropdown rather
+  than creating a new one, accepting the terms if prompted. Two clicks, and it
+  handles the cases the CLI cannot.
 
 ## The order matters
 

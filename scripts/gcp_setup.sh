@@ -324,26 +324,34 @@ say "Firebase"
 # does not fix that: the API being on and the resource existing are different
 # things.
 #
-# This is also the first step here that is not pure gcloud. If the CLI is
-# missing or its token lacks the `firebase` OAuth scope — Cloud Shell's auto
-# auth carries cloud-platform but not that one — say so and point at the
-# console rather than dying in a stack trace.
+# This is also the first step here that is not pure gcloud, so a missing CLI
+# must not produce a stack trace. When the command does run and fails, print
+# what Google actually said: the first version of this swallowed stderr and
+# guessed at the cause in prose, and the guess was wrong on the first real
+# project it met. A message from the server beats a paragraph from us.
 if ! command -v firebase >/dev/null; then
   printf '  \033[33m!\033[0m firebase CLI not found — cannot add Firebase to the project.\n'
   printf '    npm install -g firebase-tools && firebase login\n'
   printf '    or add it by hand: https://console.firebase.google.com → Add project\n'
   printf '    → pick the EXISTING %s rather than creating a new one.\n' "$PROJECT_ID"
-elif firebase projects:list 2>/dev/null | grep -q "$PROJECT_ID"; then
+elif firebase projects:list 2>/dev/null \
+     | awk '{print $2}' | grep -qx "$PROJECT_ID"; then
+  # Whole field, not a substring: `grep -q "$PROJECT_ID"` would match this id
+  # inside some other project's, and report Firebase present when it is not.
   skip "Firebase resources"
-elif firebase projects:addfirebase "$PROJECT_ID" >/dev/null 2>&1; then
-  ok "Firebase resources added"
 else
-  printf '  \033[33m!\033[0m Could not add Firebase to %s.\n' "$PROJECT_ID"
-  printf '    Most often the CLI token lacks the firebase scope:\n'
-  printf '      firebase login --reauth\n'
-  printf '    Failing that, the console does the same thing:\n'
-  printf '      https://console.firebase.google.com → Add project → pick %s\n' "$PROJECT_ID"
-  printf '    Everything else in this script has still been done.\n'
+  if add_output=$(firebase projects:addfirebase "$PROJECT_ID" 2>&1); then
+    ok "Firebase resources added"
+  else
+    printf '  \033[33m!\033[0m Could not add Firebase to %s. Google said:\n' "$PROJECT_ID"
+    printf '\033[90m      %s\033[0m\n' "${add_output//$'\n'/$'\n      '}"
+    printf '\n    The console does the same job and handles cases the CLI cannot —\n'
+    printf '    accepting the Firebase terms of service among them, which must be\n'
+    printf '    done once per account and which no CLI can present:\n'
+    printf '      https://console.firebase.google.com → Add project\n'
+    printf '      → pick the EXISTING %s rather than creating a new one.\n' "$PROJECT_ID"
+    printf '\n    Everything else in this script has still been done.\n'
+  fi
 fi
 
 # ---------------------------------------------------------------------------
