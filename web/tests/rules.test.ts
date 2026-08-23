@@ -42,9 +42,12 @@ import {
   type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import {
+  collection,
+  collectionGroup,
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   setLogLevel,
   updateDoc,
@@ -365,6 +368,85 @@ describe("the split between the two databases", () => {
         doc(asProducer(main), "purchase_orders/mirror"),
         order(PRODUCER),
       ),
+    );
+  });
+});
+
+// --------------------------------------------------------------------------
+// What the instrument panel may query
+// --------------------------------------------------------------------------
+
+describe("what a browser may query", () => {
+  /**
+   * These decide the shape of the panel's subscription rather than guarding
+   * anything. Firestore evaluates a *list* against the rule for the documents
+   * it would return, so "can read one document" does not imply "can list the
+   * collection" — and a collection-group query is evaluated against a rule
+   * matching `/{path=**}/negotiations/{id}`, which is not the nested rule we
+   * wrote. Guessing either way costs an afternoon; asserting costs four lines.
+   */
+
+  const record = (state: string) => ({
+    item_id: "mirror",
+    supplier_id: "sup1",
+    state,
+  });
+
+  beforeEach(async () => {
+    await seed(main, "projects/projA", { title: "Kopitiam" });
+    await seed(main, "projects/projA/negotiations/neg1", record("SENT"));
+    await seed(main, "projects/projB/negotiations/neg2", record("SENT"));
+    await seed(main, "projects/projA/negotiations/neg1/messages/m1", {
+      direction: "inbound",
+      body: "RM880 per unit.",
+    });
+  });
+
+  it("lists the projects, so the panel can offer a choice", async () => {
+    await assertSucceeds(getDocs(collection(asProducer(main), "projects")));
+  });
+
+  it("lists one project's negotiations", async () => {
+    // The panel's main subscription. Scoped to a project, which is what the
+    // nested rule authorises.
+    await assertSucceeds(
+      getDocs(collection(asProducer(main), "projects/projA/negotiations")),
+    );
+  });
+
+  it("lists a negotiation's messages", async () => {
+    // Phase 6's timeline, and the count shown per row today.
+    await assertSucceeds(
+      getDocs(
+        collection(
+          asProducer(main),
+          "projects/projA/negotiations/neg1/messages",
+        ),
+      ),
+    );
+  });
+
+  it("refuses a collection-group query across every project", async () => {
+    // Settled by running it, not by reading the docs. The refusal comes from
+    // the catch-all at firestore.rules:86, because a collection-group query is
+    // matched against `/{path=**}/negotiations/{id}` and our rule is nested
+    // under `/projects/{projectId}/` — which does not authorise one.
+    //
+    // So the panel subscribes per project. That is the cheaper landing anyway:
+    // firestore.indexes.json carries a COLLECTION_GROUP index on
+    // `next_action_due_at` and nothing else, so a group query ordered by any
+    // other field would need a new index deployed as well. Widening the rules
+    // to allow one would also hand a signed-in browser every project at once,
+    // which is not something the panel needs.
+    await assertFails(
+      getDocs(collectionGroup(asProducer(main), "negotiations")),
+    );
+  });
+
+  it("still shuts an unauthenticated caller out of every one of those", async () => {
+    await assertFails(getDocs(collection(asStranger(main), "projects")));
+    await assertFails(
+      getDocs(collection(asStranger(main), "projects/projA/negotiations")),
     );
   });
 });
