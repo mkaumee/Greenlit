@@ -5,6 +5,7 @@ from typing import final
 from cinema_contracts import NegotiationContext, NextMove
 from google.adk.agents import LlmAgent
 
+from main_agent.gemini_schema import gemini_output_schema
 from main_agent.runtime import AdkAgentRuntime
 
 _INSTRUCTION = """You decide one next action in a procurement negotiation.
@@ -32,8 +33,8 @@ class NegotiationDecider:
             description="Recommend the next safe procurement negotiation move.",
             model=model,
             instruction=_INSTRUCTION,
-            output_schema=NextMove,
-            mode="single_turn",
+            output_schema=gemini_output_schema(NextMove),
+            mode="chat",
         )
         self._runtime = AdkAgentRuntime(
             app_name="cinema_negotiation_decider",

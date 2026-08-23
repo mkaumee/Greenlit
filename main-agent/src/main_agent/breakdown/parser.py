@@ -6,6 +6,7 @@ from typing import cast, final
 from cinema_contracts import BreakdownSource, ItemDraft
 from google.adk.agents import LlmAgent
 
+from main_agent.gemini_schema import gemini_output_schema
 from main_agent.runtime import AdkAgentRuntime
 
 _INSTRUCTION = """You extract procurement items from a shooting breakdown.
@@ -32,8 +33,8 @@ class BreakdownParser:
             description="Extract purchasable item drafts from a shooting breakdown.",
             model=model,
             instruction=_INSTRUCTION,
-            output_schema=list[ItemDraft],
-            mode="single_turn",
+            output_schema=gemini_output_schema(list[ItemDraft]),
+            mode="chat",
         )
         self._runtime = AdkAgentRuntime(
             app_name="cinema_breakdown_parser",

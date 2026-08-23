@@ -11,6 +11,7 @@ from parallel import (
     ParallelError,
 )
 
+from main_agent.gemini_schema import gemini_output_schema
 from main_agent.runtime import AdkAgentRuntime
 
 _INSTRUCTION = """You research one film-production procurement item.
@@ -97,8 +98,8 @@ class ItemResearcher:
             model=model,
             instruction=_INSTRUCTION,
             tools=[_SEARCH_TOOL],
-            output_schema=ItemResearch,
-            mode="single_turn",
+            output_schema=gemini_output_schema(ItemResearch),
+            mode="chat",
         )
         self._runtime = AdkAgentRuntime(
             app_name="cinema_item_researcher",
