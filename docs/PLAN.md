@@ -69,15 +69,16 @@ Verified, not assumed — every claim below is covered by a test in the repo.
 | **Phase 2** — script upload, prop confirmation, research, negotiation creation | Done |
 | **Phase 4** — auth, approval service, rules tests | Done |
 | **Phase 3** — deploy | **Done and verified against real infrastructure** |
+| **Phase 5** — instrument panel | Built and driven; needs a Firebase web app registered before it can point at production |
 
-229 Python tests, plus 22 rules tests in `web/`. CI fails the build if any
+229 Python tests, plus 27 rules tests in `web/`. CI fails the build if any
 Python test skips, since a green run that skipped the guardrail tests is worse
 than a red one — `make check` runs the same `test-all` target for that reason,
 so a green laptop and a green CI mean the same thing.
 
 **Not started**
 
-`web/` has rules tests but no app yet (Phases 5–6) · `supplier-sim/`,
+`web/` has the read-only panel but none of Phase 6's screens · `supplier-sim/`,
 scaffolding only (later) · the live Gmail round-trip, which needs the OAuth
 bootstrap and two mailboxes.
 
@@ -410,6 +411,46 @@ put the rules tests there. Extend it; do not start a second npm project.
 **Why it earns its place.** It is the debugging surface for Phases 2–4, it
 proves listeners, auth and hosting early, and it becomes the timeline screen in
 Phase 6 rather than being thrown away. Budget three hours; do not gold-plate it.
+
+### Built — DONE against the emulator
+
+`make e2e` fills the emulator, `make web-dev` serves the panel, and writing to
+a negotiation document from outside the browser moves the row: state and
+escalation reason changed with zero page loads. Driven headlessly to check
+that rather than eyeballed.
+
+Three things worth carrying forward:
+
+- **A collection-group query is refused**, by the catch-all at
+  `firestore.rules:86` — Firestore matches one against
+  `/{path=**}/negotiations/{id}` and our rule is nested under
+  `/projects/{projectId}/`. Asserted in `web/tests/rules.test.ts` rather than
+  assumed, and the panel subscribes per project as a result. Phase 6 inherits
+  this: no screen may query across projects without a rules change.
+- **The web config is committed** in `web/src/firebase-config.ts`. A Firebase
+  web API key is a public identifier, not a credential; hiding it would only
+  break a fresh clone. The file says so.
+- **Message counts refresh on the negotiation document's snapshot**, not on new
+  messages, because a subcollection write does not fire the parent's listener.
+  Fine while the tick writes both together.
+
+### Still outstanding
+
+- **Register a Firebase web app and paste its config in.** Until then
+  `firebase-config.ts` holds placeholders and the panel runs against the
+  emulator only — it throws something legible rather than failing deep in the
+  SDK if pointed at production:
+
+  ```bash
+  firebase apps:create web "Agentic Cinema" --project $PROJECT_ID
+  firebase apps:sdkconfig web --project $PROJECT_ID
+  ```
+
+- **Enable the Google sign-in provider** — Firebase console → Authentication →
+  Sign-in method → Google.
+- Then `make deploy-web PROJECT_ID=...`. The hosted panel will show an empty
+  table until a screenplay is uploaded to the deployed project, which is the
+  correct result rather than a bug.
 
 ---
 
