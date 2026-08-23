@@ -343,7 +343,15 @@ else
   if add_output=$(firebase projects:addfirebase "$PROJECT_ID" 2>&1); then
     ok "Firebase resources added"
   else
+    # firebase-tools puts the HTTP status and message only in its debug log and
+    # writes "See firebase-debug.log for more info" to stderr, so relaying
+    # stderr alone relays a pointer rather than a cause. Dig the real line out.
+    # It is the difference between "something went wrong" and "403".
+    detail=$(grep -o 'HTTP Error: .*' firebase-debug.log 2>/dev/null | tail -1)
     printf '  \033[33m!\033[0m Could not add Firebase to %s. Google said:\n' "$PROJECT_ID"
+    if [[ -n "$detail" ]]; then
+      printf '\033[90m      %s\033[0m\n' "$detail"
+    fi
     printf '\033[90m      %s\033[0m\n' "${add_output//$'\n'/$'\n      '}"
     printf '\n    The console does the same job and handles cases the CLI cannot —\n'
     printf '    accepting the Firebase terms of service among them, which must be\n'

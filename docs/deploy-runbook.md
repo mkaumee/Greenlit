@@ -51,11 +51,13 @@ Budget half an hour for the first run, most of it waiting for the first build.
   rather than guessing**. The script relays Google's own error for the same
   reason.
 
-  The CLI cannot always finish this job. Firebase's terms of service have to be
-  accepted once per account and no command-line tool can present them, so
-  `addfirebase` can fail on an account with full owner rights and a correctly
-  scoped token, saying nothing useful about why. When that happens, stop
-  fighting it: [console.firebase.google.com](https://console.firebase.google.com)
+  The CLI cannot always finish this job. Observed on this project:
+  `:addFirebase` returned **403 PERMISSION_DENIED** to an account holding
+  `roles/owner`, authorising as the right user, with a freshly minted token
+  carrying the `firebase` scope — every IAM explanation ruled out by the log
+  itself. Accepting Firebase's terms of service is a per-account step that no
+  command-line tool can present, and the API refuses until it has happened.
+  When you see that 403, stop fighting it: [console.firebase.google.com](https://console.firebase.google.com)
   → **Add project** → pick the **existing** project from the dropdown rather
   than creating a new one, accepting the terms if prompted. Two clicks, and it
   handles the cases the CLI cannot.
