@@ -1,50 +1,61 @@
 #!/usr/bin/env python3
+# Responses come back through httpx .json(), which is untyped by nature; this
+# script reads them as the UI would rather than re-deriving the models.
+# pyright: reportAny=false
 """Run the whole loop end to end, and say whether it still works.
 
-This is the daily ten-minute habit. It boots nothing external except the
-Firestore emulator, seeds a project, and drives real negotiations through the
-real tick loop with the real state machine and the real repository. Only two
-things are stand-ins: the brain (``ScriptedBrain``, no LLM) and the mail
-transport (in-memory, no Gmail).
+The daily ten-minute habit. A screenplay goes in at the top and the run ends
+with negotiations that reached a human — through the real HTTP endpoints, the
+real sourcing step, the real state machine and the real repository.
 
-That is deliberate. Those two are exactly the pieces that need credentials, and
-making them swappable is what lets this run on any laptop, in CI, and on a
-branch where the other half of the team's code does not exist yet.
+Only two things are stand-ins: the brain (no LLM) and the mail transport (no
+Gmail). Those are exactly the two that need credentials, which is what lets
+this run on any laptop, in CI, and on a branch where Role A's code does not
+exist yet.
 
-Run it with ``make e2e``. It exits non-zero if the loop stops working, so it can
-gate a merge.
+**Nothing is hand-seeded.** That matters more than it sounds. This script used
+to create items, suppliers and negotiations itself, which made the pipeline
+look complete while nothing actually connected a script to them — the gap was
+invisible precisely because the test worked around it.
 
-What it asserts at the end:
+Run with ``make e2e``. Non-zero exit if the loop breaks, so it can gate a merge.
 
+Asserted at the end:
+
+- every confirmed prop got as far as being negotiated for
 - at least one negotiation reached READY_FOR_HUMAN
-- the ghost supplier's negotiation ended DEAD rather than hanging
-- ``purchase_orders`` is empty — the agent negotiated for five simulated days
-  and bought nothing
+- the ghost seller's negotiations ended DEAD rather than hanging
+- ``purchase_orders`` is empty — five simulated days of negotiating, nothing bought
 """
 
 import asyncio
 import os
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import override
 
 import httpx
-from cinema_contracts import ClockMode, Money, NegotiationState
+from cinema_contracts import (
+    ItemBrief,
+    ItemResearch,
+    NegotiationState,
+    SupplierCandidate,
+)
 from cinema_contracts.testing import ScriptedBrain
 from google.auth.credentials import AnonymousCredentials
 from google.cloud.firestore_v1 import AsyncClient
-from orchestrator.clock import ClockState, FrozenRealTime, SimClock
+from orchestrator.app import Services, app
+from orchestrator.clock import FrozenRealTime, SimClock
 from orchestrator.mail import InMemoryMailbox
-from orchestrator.records import (
-    ItemRecord,
-    NegotiationRecord,
-    ProjectRecord,
-    SupplierRecord,
-)
-from orchestrator.repository import FirestoreRepository
+from orchestrator.records import ItemStatus
+from orchestrator.repository import FirestoreRepository, OrdersRepository
+from orchestrator.settings import Settings
+from orchestrator.sourcing import supplier_id_for
 from orchestrator.tick import TickLoop
 
 EMULATOR_HOST = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
 PROJECT_ID = os.environ.get("FIRESTORE_PROJECT_ID", "demo-cinema")
+ORDERS_DATABASE = "orders"
 PID = "e2e-project"
 
 SIM_START = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
@@ -54,56 +65,60 @@ TICKS = 40
 HOURS_PER_TICK = 3
 """Forty ticks at three simulated hours each is five simulated days."""
 
+SCREENPLAY = """INT. DIVE BAR - NIGHT
+
+RAZAK nurses a drink at the counter. The BARMAN watches him.
+
+RAZAK grabbed the cup and threw it towards the mirror.
+
+Glass rains down behind the bar.
+
+EXT. ALLEY - CONTINUOUS
+
+Razak lights a cigarette with a shaking hand.
+"""
+
+FLOOR = {"amount": 750, "currency": "MYR"}
+
 
 class Persona:
-    """A scripted supplier. Enough to exercise the loop, not the real simulator.
+    """A scripted seller. Enough to exercise the loop, not the real simulator.
 
-    The real adversary lives in ``supplier-sim/`` as a separate service with its
-    own mailbox and Gemini writing every reply. This is the cheap version that
-    runs without a network, so the daily check stays a ten-minute habit.
+    The real adversary will live in ``supplier-sim/`` as a separate service
+    with its own mailbox and Gemini writing every reply. This is the cheap
+    version that runs without a network, so the daily check stays ten minutes.
     """
 
     name: str
     email: str
     opening: int
     floor: int
-    replies_after: int
     ghost_after: int
 
     def __init__(
-        self,
-        name: str,
-        email: str,
-        *,
-        opening: int,
-        floor: int,
-        replies_after: int = 1,
-        ghost_after: int = 99,
+        self, name: str, email: str, *, opening: int, floor: int, ghost_after: int = 99
     ) -> None:
         self.name = name
         self.email = email
         self.opening = opening
         self.floor = floor
-        self.replies_after = replies_after
         self.ghost_after = ghost_after
 
     def reply_to(self, round_number: int) -> str | None:
-        """What this supplier says on round N, or None if they stay quiet."""
+        """What this seller says on round N, or None if they stay quiet."""
         if round_number >= self.ghost_after:
             return None
         conceded = max(self.floor, int(self.opening * (0.88**round_number)))
         if round_number == 0:
-            return f"Thanks for reaching out. Our rate is RM{conceded:,} per day."
+            return f"Thanks for reaching out. Our rate is RM{conceded:,}."
         return f"Best we can do is RM{conceded:,}."
 
 
 PERSONAS = [
-    Persona("Ah Seng Rentals", "ahseng@example.invalid", opening=1200, floor=850),
+    Persona("Ah Seng Props", "ahseng@example.invalid", opening=1200, floor=680),
+    Persona("Skyline Supply", "skyline@example.invalid", opening=2400, floor=900),
     Persona(
-        "Skyline Grip (anchorer)", "skyline@example.invalid", opening=2400, floor=900
-    ),
-    Persona(
-        "Quiet Sdn Bhd (ghost)",
+        "Quiet Sdn Bhd",
         "quiet@example.invalid",
         opening=1100,
         floor=1000,
@@ -111,19 +126,41 @@ PERSONAS = [
     ),
 ]
 
-ITEMS = [
-    ("item-skypanel", "Arri SkyPanel S60", "lighting"),
-    ("item-grip", "Grip truck, 3 tonne", "transport"),
-    ("item-smoke", "Smoke machine", "fx"),
-]
+GHOST_SUPPLIER_ID = supplier_id_for(PERSONAS[-1].email)
 
 
-def _wipe() -> None:
-    url = (
+class E2EBrain(ScriptedBrain):
+    """The scripted brain, with research pointed at our three personas.
+
+    Subclassed here rather than baked into ScriptedBrain: the personas are a
+    property of this rehearsal, not of the contract.
+    """
+
+    @override
+    async def research_item(self, brief: ItemBrief) -> ItemResearch:
+        base = await super().research_item(brief)
+        return base.model_copy(
+            update={
+                "supplier_candidates": [
+                    SupplierCandidate(name=p.name, email=p.email, confidence=0.5)
+                    for p in PERSONAS
+                ]
+            }
+        )
+
+
+def _wipe(database: str) -> None:
+    """Empty one database. Both need clearing independently.
+
+    Wiping only (default) would leave a purchase order behind in `orders`, and
+    the final assertion of this run is that no order exists — a stale one would
+    fail it for the wrong reason, or hide a real bug behind a clean-looking run.
+    """
+    _ = httpx.delete(
         f"http://{EMULATOR_HOST}/emulator/v1/projects/{PROJECT_ID}"
-        f"/databases/(default)/documents"
+        f"/databases/{database}/documents",
+        timeout=10.0,
     )
-    _ = httpx.delete(url, timeout=10.0)
 
 
 def _emulator_up() -> bool:
@@ -133,143 +170,144 @@ def _emulator_up() -> bool:
         return False
 
 
-async def seed(repo: FirestoreRepository) -> None:
-    await repo.create_project(
-        PID,
-        ProjectRecord(
-            title="Nasi Lemak Nights",
-            clock=ClockState(
-                sim_now=SIM_START,
-                real_anchor=REAL_ANCHOR,
-                speed=0.0,
-                mode=ClockMode.FROZEN,
-            ),
-            budget_baseline=Money(amount=50_000),
-            created_at=SIM_START,
-        ),
+async def seed_from_screenplay(api: httpx.AsyncClient) -> int:
+    """Create the project, read the script, confirm the list. Nothing else."""
+    created = await api.post(
+        "/projects",
+        json={
+            "project_id": PID,
+            "title": "Nasi Lemak Nights",
+            "sim_start": SIM_START.isoformat(),
+        },
     )
+    if created.status_code != 201:
+        print(f"could not create project: {created.status_code} {created.text}")
+        return 1
 
-    for index, (persona, (item_id, item_name, category)) in enumerate(
-        zip(PERSONAS, ITEMS, strict=True)
-    ):
-        supplier_id = f"sup{index}"
-        await repo.save_item(
-            PID, item_id, ItemRecord(name=item_name, category=category)
+    read = await api.post(f"/projects/{PID}/script", json={"text_content": SCREENPLAY})
+    props = read.json()["props"]
+    print(f"  read the script -> {len(props)} props")
+    for prop in props:
+        flag = "  (destroyed on camera)" if prop["consumable"] else ""
+        print(f"    {prop['name']:<12} scene {prop['scenes'][0]}{flag}")
+
+    # A producer signing off. Consumables get several, because they break.
+    _ = await api.post(
+        f"/projects/{PID}/items/confirm",
+        json={
+            "items": [
+                {
+                    "item_id": p["item_id"],
+                    "qty": 6 if p["consumable"] else 1,
+                    "floor_price": FLOOR,
+                }
+                for p in props
+            ]
+        },
+    )
+    print(f"  producer confirmed {len(props)} items\n")
+    return 0
+
+
+async def drive(api: httpx.AsyncClient, clock: SimClock, mail: InMemoryMailbox) -> None:
+    """Advance simulated time, ticking and letting the sellers answer."""
+    by_email = {p.email: p for p in PERSONAS}
+    rounds: dict[str, int] = {}
+    answered = 0
+    moment = SIM_START
+
+    for tick in range(TICKS):
+        _ = await clock.set_sim_now(PID, moment)
+        report = (await api.post("/tick")).json()["projects"][0]
+
+        interesting = (
+            "items_researched",
+            "negotiations_opened",
+            "messages_sent",
+            "replies_filed",
+            "escalated",
         )
-        await repo.save_supplier(
-            PID,
-            supplier_id,
-            SupplierRecord(name=persona.name, email=persona.email, verified=True),
-        )
-        await repo.save_negotiation(
-            PID,
-            f"neg{index}",
-            NegotiationRecord(
-                item_id=item_id,
-                supplier_id=supplier_id,
-                state=NegotiationState.DRAFTED,
-                floor_price=Money(amount=persona.floor + 50),
-                next_action_due_at=SIM_START,
-                created_at=SIM_START,
-                updated_at=SIM_START,
-            ),
-        )
+        if any(report[key] for key in interesting):
+            print(
+                f"  t+{tick * HOURS_PER_TICK:>3}h  "
+                f"researched={report['items_researched']} "
+                f"opened={report['negotiations_opened']} "
+                f"sent={report['messages_sent']} "
+                f"filed={report['replies_filed']} "
+                f"escalated={report['escalated']}"
+            )
+
+        for outbound in mail.sent[answered:]:
+            persona = by_email.get(outbound["to"])
+            if persona is None:
+                continue
+            thread = outbound["thread_id"]
+            round_number = rounds.get(thread, 0)
+            rounds[thread] = round_number + 1
+            body = persona.reply_to(round_number)
+            if body is not None:
+                _ = mail.deliver(thread_id=thread, body=body, from_email=persona.email)
+        answered = len(mail.sent)
+
+        moment += timedelta(hours=HOURS_PER_TICK)
 
 
-async def run() -> int:
-    if not _emulator_up():
-        print(f"Firestore emulator not reachable at {EMULATOR_HOST}.")
-        print("Start it with `make emulator`, or use `make e2e` which boots it.")
-        return 2
-
-    os.environ["FIRESTORE_EMULATOR_HOST"] = EMULATOR_HOST
-    _wipe()
-
-    client = AsyncClient(project=PROJECT_ID, credentials=AnonymousCredentials())
-    repo = FirestoreRepository(client)
-    clock = SimClock(repo, FrozenRealTime(REAL_ANCHOR))
-    mail = InMemoryMailbox()
-    loop = TickLoop(repo, clock, ScriptedBrain(), mail)
-
-    try:
-        await seed(repo)
-
-        by_email = {p.email: p for p in PERSONAS}
-        rounds: dict[str, int] = {}
-        already_answered = 0
-        moment = SIM_START
-
-        for tick in range(TICKS):
-            _ = await clock.set_sim_now(PID, moment)
-            report = await loop.run_tick(PID)
-
-            if report.did_something:
-                print(
-                    f"  t+{tick * HOURS_PER_TICK:>3}h  "
-                    f"sent={report.messages_sent} filed={report.replies_filed} "
-                    f"escalated={report.escalated}"
-                )
-
-            # The supplier side: answer anything new that went out.
-            for outbound in mail.sent[already_answered:]:
-                persona = by_email.get(outbound["to"])
-                if persona is None:
-                    continue
-                thread = outbound["thread_id"]
-                round_number = rounds.get(thread, 0)
-                body = persona.reply_to(round_number)
-                rounds[thread] = round_number + 1
-                if body is not None:
-                    _ = mail.deliver(
-                        thread_id=thread, body=body, from_email=persona.email
-                    )
-            already_answered = len(mail.sent)
-
-            moment += timedelta(hours=HOURS_PER_TICK)
-
-        return await verify(repo, mail)
-    finally:
-        client.close()
-
-
-async def verify(repo: FirestoreRepository, mail: InMemoryMailbox) -> int:
+async def verify(
+    repo: FirestoreRepository, orders: OrdersRepository, mail: InMemoryMailbox
+) -> int:
+    items = await repo.list_items(PID)
     negotiations = await repo.list_negotiations(PID)
 
-    print("\n  final state")
+    print("\n  items")
+    for item_id, item in sorted(items.items()):
+        band = item.reference_band
+        span = f"{band.low}-{band.high}" if band else "—"
+        print(
+            f"    {item_id:<12} {item.status.value:<12} qty={item.qty:<2} band={span}"
+        )
+
+    print("\n  negotiations")
     for negotiation_id, record in sorted(negotiations.items()):
         quote = record.latest_quote.unit_price if record.latest_quote else "—"
         print(
-            f"    {negotiation_id}  {record.state.value:<16} "
-            f"quote={quote!s:<12} rounds={record.rounds_used} "
+            f"    {negotiation_id:<36} {record.state.value:<16} "
+            f"quote={quote!s:<11} rounds={record.rounds_used} "
             f"{record.escalation_reason}"
         )
 
     failures: list[str] = []
+
+    if not items:
+        failures.append("the script produced no items")
+    if not negotiations:
+        failures.append("no negotiations were opened from the confirmed items")
+
+    unstarted = [i for i, r in items.items() if r.status is ItemStatus.DRAFT]
+    if unstarted:
+        failures.append(f"items never left DRAFT: {unstarted}")
 
     if not any(
         r.state is NegotiationState.READY_FOR_HUMAN for r in negotiations.values()
     ):
         failures.append("no negotiation reached READY_FOR_HUMAN")
 
-    ghost = negotiations.get("neg2")
-    if ghost is not None and ghost.state not in {
-        NegotiationState.DEAD,
-        NegotiationState.CHASING,
-        NegotiationState.READY_FOR_HUMAN,
-    }:
-        failures.append(f"the ghost negotiation hung in {ghost.state.value}")
-
-    ordered = await repo.total_ordered()
-    if ordered is not None:
-        failures.append(f"the agent created a purchase order: {ordered}")
-
-    stuck = [
+    hung = [
         nid
         for nid, r in negotiations.items()
-        if r.state in {NegotiationState.DRAFTED, NegotiationState.SENT}
+        if r.supplier_id == GHOST_SUPPLIER_ID
+        and r.state
+        not in {
+            NegotiationState.DEAD,
+            NegotiationState.CHASING,
+            NegotiationState.READY_FOR_HUMAN,
+        }
     ]
-    if stuck:
-        failures.append(f"negotiations never got going: {stuck}")
+    if hung:
+        failures.append(f"the ghost seller left negotiations hanging: {hung}")
+
+    ordered = await orders.total_ordered()
+    if ordered is not None:
+        failures.append(f"the agent created a purchase order: {ordered}")
 
     print(f"\n  {len(mail.sent)} emails sent over 5 simulated days")
     print(
@@ -282,12 +320,62 @@ async def verify(repo: FirestoreRepository, mail: InMemoryMailbox) -> int:
             print(f"  - {failure}")
         return 1
 
-    print("\nOK — the loop runs end to end and buys nothing.")
+    print("\nOK — screenplay in, negotiations out, and nothing was bought.")
     return 0
 
 
+async def run() -> int:
+    if not _emulator_up():
+        print(f"Firestore emulator not reachable at {EMULATOR_HOST}.")
+        print("Start it with `make emulator`, or use `make e2e` which boots it.")
+        return 2
+
+    os.environ["FIRESTORE_EMULATOR_HOST"] = EMULATOR_HOST
+    _wipe("(default)")
+    _wipe(ORDERS_DATABASE)
+
+    client = AsyncClient(project=PROJECT_ID, credentials=AnonymousCredentials())
+    # A second client, on the database the tick service has no access to and no
+    # method to reach. It exists only so the final check can look at where an
+    # order would land if the guardrail ever failed.
+    orders_client = AsyncClient(
+        project=PROJECT_ID,
+        credentials=AnonymousCredentials(),
+        database=ORDERS_DATABASE,
+    )
+
+    repo = FirestoreRepository(client)
+    orders = OrdersRepository(orders_client)
+    clock = SimClock(repo, FrozenRealTime(REAL_ANCHOR))
+    mail = InMemoryMailbox()
+    brain = E2EBrain()
+
+    app.state.services = Services(
+        settings=Settings(_env_file=None, gcp_project=PROJECT_ID),  # pyright: ignore[reportCallIssue]
+        client=client,
+        repo=repo,
+        clock=clock,
+        brain=brain,
+        mail=mail,
+        loop=TickLoop(repo, clock, brain, mail),
+    )
+    api = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://e2e"
+    )
+
+    try:
+        if (code := await seed_from_screenplay(api)) != 0:
+            return code
+        await drive(api, clock, mail)
+        return await verify(repo, orders, mail)
+    finally:
+        await api.aclose()
+        client.close()
+        orders_client.close()
+
+
 def main() -> int:
-    print("end-to-end: 3 suppliers, 5 simulated days, scripted brain, in-memory mail\n")
+    print("end-to-end: screenplay -> props -> research -> negotiation -> a human\n")
     return asyncio.run(run())
 
 

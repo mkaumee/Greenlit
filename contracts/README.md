@@ -9,7 +9,7 @@ Role A implements `AgentBrain` in `main-agent`:
 
 | Method | Direction | Purpose |
 | --- | --- | --- |
-| `parse_breakdown(source) -> list[ItemDraft]` | B calls A | Upload becomes a list of purchasable items |
+| `extract_props(source) -> list[PropDraft]` | B calls A | Screenplay becomes a list of physical things the scenes need |
 | `research_item(brief) -> ItemResearch` | B calls A | Reference price band with sources, plus supplier candidates |
 | `extract_quote(message) -> QuoteExtraction` | B calls A | Read a supplier reply, or refuse to and escalate |
 | `next_move(ctx) -> NextMove` | B calls A | Decide the next action and write any email it needs |
@@ -41,6 +41,8 @@ end-to-end run rather than in a demo:
   wrote and never composes text itself.
 - A `COUNTER` must name a `target_price`, so the UI can show what the agent is
   pushing for.
+- A `SceneMention` must quote a non-empty line. A prop with no line behind it is
+  the cheapest possible tell that it was invented rather than found.
 - `ACCEPT` and `ESCALATE` must give an `EscalationReason`. Use `GOOD_QUOTE` when
   the negotiation simply succeeded.
 - Every model forbids unknown fields. If one side adds a field the other has not

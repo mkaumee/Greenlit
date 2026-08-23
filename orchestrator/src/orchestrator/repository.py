@@ -19,13 +19,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from cinema_contracts import TERMINAL_STATES, Money
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import Aborted, AlreadyExists, FailedPrecondition
 from google.cloud.firestore_v1 import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from orchestrator.clock import ClockState
 from orchestrator.records import (
+    ITEM_TERMINAL_STATUSES,
     ItemRecord,
+    ItemStatus,
     MessageRecord,
     NegotiationRecord,
     ProjectRecord,
@@ -63,18 +65,50 @@ class DuplicateOrderError(RuntimeError):
 
 
 class DueNegotiation:
-    """A negotiation the tick loop should act on, with its location."""
+    """A negotiation the tick loop should act on, with its location.
+
+    ``update_time`` is Firestore's version stamp for the document as it was
+    read. It is what ``claim_negotiation`` compares against, and the reason a
+    second overlapping tick cannot act on the same row.
+    """
 
     project_id: str
     negotiation_id: str
     record: NegotiationRecord
+    update_time: datetime
 
     def __init__(
-        self, project_id: str, negotiation_id: str, record: NegotiationRecord
+        self,
+        project_id: str,
+        negotiation_id: str,
+        record: NegotiationRecord,
+        update_time: datetime,
     ) -> None:
         self.project_id = project_id
         self.negotiation_id = negotiation_id
         self.record = record
+        self.update_time = update_time
+
+
+class DueItem:
+    """An item the tick loop should act on, with its location."""
+
+    project_id: str
+    item_id: str
+    record: ItemRecord
+    update_time: datetime
+
+    def __init__(
+        self,
+        project_id: str,
+        item_id: str,
+        record: ItemRecord,
+        update_time: datetime,
+    ) -> None:
+        self.project_id = project_id
+        self.item_id = item_id
+        self.record = record
+        self.update_time = update_time
 
 
 class FirestoreRepository:
@@ -89,6 +123,63 @@ class FirestoreRepository:
 
     def __init__(self, client: AsyncClient) -> None:
         self._db = client
+
+    # ------------------------------------------------------------------ #
+    # Claiming
+    # ------------------------------------------------------------------ #
+
+    async def _claim(
+        self, ref: AsyncDocumentReference, update_time: datetime, until: datetime
+    ) -> bool:
+        """Push a due row forward, but only if nobody has touched it since.
+
+        Cloud Scheduler does not wait for one ``/tick`` to finish before firing
+        the next, so two ticks routinely read the same due row. Without this
+        they would both ask the brain and both email the supplier — which looks
+        exactly like the pestering bug already fixed in ``tick.py``, from an
+        entirely different cause.
+
+        The protection is Firestore's, not ours. Both ticks read the document at
+        the same ``update_time`` and both attempt this conditional write; the
+        storage engine admits exactly one and refuses the other with
+        ``FAILED_PRECONDITION``. Same argument as ``create()`` on purchase
+        orders: a check-then-write in our own code would have a race between the
+        two halves, and this does not.
+
+        Note what the *lease* is and is not. It is not what makes this safe —
+        the compare-and-swap above is, at any clock speed, which is why DEMO
+        mode needs no special handling. The lease only bounds how long a row
+        sits idle if the winner is then killed mid-work.
+        """
+        try:
+            _ = await ref.update(
+                {"next_action_due_at": until},
+                option=self._db.write_option(last_update_time=update_time),
+            )
+        except FailedPrecondition, Aborted:
+            return False
+        return True
+
+    async def claim_negotiation(self, due: DueNegotiation, until: datetime) -> bool:
+        """Take a negotiation for this tick. False means another tick has it."""
+        return await self._claim(
+            self._negotiation_ref(due.project_id, due.negotiation_id),
+            due.update_time,
+            until,
+        )
+
+    async def claim_item(self, due: DueItem, until: datetime) -> bool:
+        """Take an item for this tick. False means another tick has it.
+
+        Duplicated research is a wasted LLM call rather than a duplicated
+        email, so the cost of losing this race is money instead of a supplier's
+        goodwill. Worth claiming anyway, for the same reason.
+        """
+        return await self._claim(
+            self._project_ref(due.project_id).collection(ITEMS).document(due.item_id),
+            due.update_time,
+            until,
+        )
 
     # ------------------------------------------------------------------ #
     # Clock (implements ClockStore)
@@ -114,6 +205,17 @@ class FirestoreRepository:
     async def create_project(self, project_id: str, record: ProjectRecord) -> None:
         _ = await self._project_ref(project_id).create(record.to_firestore())
 
+    async def list_project_ids(self) -> list[str]:
+        """Every project id, sorted.
+
+        The tick endpoint uses this when Cloud Scheduler calls it with no body:
+        one scheduled call has to cover every production in the system, and
+        the clock is advanced per project.
+        """
+        return sorted(
+            [snapshot.id async for snapshot in self._db.collection(PROJECTS).stream()]
+        )
+
     async def get_project(self, project_id: str) -> ProjectRecord | None:
         snapshot = await self._project_ref(project_id).get()
         data = snapshot.to_dict()
@@ -124,8 +226,19 @@ class FirestoreRepository:
     # ------------------------------------------------------------------ #
 
     async def save_item(self, project_id: str, item_id: str, rec: ItemRecord) -> None:
+        """Write an item, dropping the due field when it must not be picked up.
+
+        Same trick as negotiations: a missing field leaves the document out of
+        the index entirely. Two cases want that. Finished items are obvious.
+        ``DRAFT`` is the important one — an item the producer has not confirmed
+        yet must never be researched or emailed about, and enforcing that by
+        absence from the queue is stronger than remembering to filter on it.
+        """
+        payload = rec.to_firestore()
+        if rec.status in ITEM_TERMINAL_STATUSES or rec.status is ItemStatus.DRAFT:
+            _ = payload.pop("next_action_due_at", None)
         ref = self._project_ref(project_id).collection(ITEMS).document(item_id)
-        _ = await ref.set(rec.to_firestore())
+        _ = await ref.set(payload)
 
     async def get_item(self, project_id: str, item_id: str) -> ItemRecord | None:
         ref = self._project_ref(project_id).collection(ITEMS).document(item_id)
@@ -141,11 +254,53 @@ class FirestoreRepository:
                 found[snapshot.id] = ItemRecord.model_validate(data)
         return found
 
+    async def due_items(self, now: datetime, *, limit: int = 25) -> list[DueItem]:
+        """Confirmed items waiting on research or on having negotiations opened.
+
+        A second collection-group query alongside ``due_negotiations``, on the
+        same shape of field. Deliberately the same pattern rather than a
+        bespoke background job: one recovery story, one index shape, and the
+        research step inherits the tick's killability for free.
+        """
+        query = (
+            self._db.collection_group(ITEMS)
+            .where(filter=FieldFilter("next_action_due_at", "<=", now))
+            .order_by("next_action_due_at")
+            .limit(limit)
+        )
+
+        due: list[DueItem] = []
+        async for snapshot in query.stream():
+            data = snapshot.to_dict()
+            if data is None:
+                continue
+            project_ref = snapshot.reference.parent.parent
+            if project_ref is None:
+                continue
+            due.append(
+                DueItem(
+                    project_id=project_ref.id,
+                    item_id=snapshot.id,
+                    record=ItemRecord.model_validate(data),
+                    update_time=snapshot.update_time,
+                )
+            )
+        return due
+
     async def save_supplier(
         self, project_id: str, supplier_id: str, rec: SupplierRecord
     ) -> None:
         ref = self._project_ref(project_id).collection(SUPPLIERS).document(supplier_id)
         _ = await ref.set(rec.to_firestore())
+
+    async def list_suppliers(self, project_id: str) -> dict[str, SupplierRecord]:
+        collection = self._project_ref(project_id).collection(SUPPLIERS)
+        found: dict[str, SupplierRecord] = {}
+        async for snapshot in collection.stream():
+            data = snapshot.to_dict()
+            if data is not None:
+                found[snapshot.id] = SupplierRecord.model_validate(data)
+        return found
 
     async def get_supplier(
         self, project_id: str, supplier_id: str
@@ -181,6 +336,27 @@ class FirestoreRepository:
         if rec.state in TERMINAL_STATES:
             _ = payload.pop("next_action_due_at", None)
         _ = await self._negotiation_ref(project_id, negotiation_id).set(payload)
+
+    async def create_negotiation(
+        self, project_id: str, negotiation_id: str, rec: NegotiationRecord
+    ) -> bool:
+        """Open a negotiation, or report that it already exists.
+
+        ``create()`` rather than ``set()``, against a caller-chosen id derived
+        from the item and supplier. Opening negotiations is the one step that
+        fans out — one item becomes several — so a tick killed midway through
+        would otherwise reopen the ones it had already created and email those
+        suppliers twice.
+
+        Returns False when the document was already there, which the caller
+        treats as "someone got here first, nothing to do".
+        """
+        ref = self._negotiation_ref(project_id, negotiation_id)
+        try:
+            _ = await ref.create(rec.to_firestore())
+        except AlreadyExists:
+            return False
+        return True
 
     async def get_negotiation(
         self, project_id: str, negotiation_id: str
@@ -230,6 +406,7 @@ class FirestoreRepository:
                     project_id=project_ref.id,
                     negotiation_id=snapshot.id,
                     record=NegotiationRecord.model_validate(data),
+                    update_time=snapshot.update_time,
                 )
             )
         return due
@@ -257,6 +434,7 @@ class FirestoreRepository:
                 project_id=project_ref.id,
                 negotiation_id=snapshot.id,
                 record=NegotiationRecord.model_validate(data),
+                update_time=snapshot.update_time,
             )
         return None
 
@@ -308,9 +486,43 @@ class FirestoreRepository:
                 found.append(MessageRecord.model_validate(data))
         return found
 
-    # ------------------------------------------------------------------ #
-    # Purchase orders — the guardrail
-    # ------------------------------------------------------------------ #
+    # Purchase orders are deliberately absent from this class. They live in
+    # OrdersRepository, against a different database. See its docstring.
+
+
+class OrdersRepository:
+    """Purchase orders. A separate class against a separate database.
+
+    ## Why this is not a method on FirestoreRepository
+
+    Two facts about Firestore, which only bite once deployed:
+
+    1. **Security rules do not apply to server SDKs.** They govern the Firebase
+       client SDKs — a browser holding a Firebase Auth token. A service account
+       going through ``google-cloud-firestore`` bypasses ``firestore.rules``
+       entirely, so a rule denying order writes constrains a producer's browser
+       and constrains nothing whatsoever about the agent.
+    2. **Firestore IAM has no collection-level granularity.**
+       ``roles/datastore.user`` is all or nothing across a whole database.
+
+    Together those mean a single database simply cannot express "this service
+    account may write negotiations but not purchase orders". The smallest thing
+    IAM can talk about is a database, so the boundary has to be a database.
+
+    The tick service is granted access to ``(default)`` under an IAM condition
+    and never constructs a client for this one. That makes Hard Rule 5 an
+    infrastructure fact you can check with a single ``gcloud`` command, rather
+    than a promise about our own code.
+
+    Splitting the class as well as the database is belt and braces: the tick
+    loop is handed a ``FirestoreRepository``, which has no method that could
+    write an order even if the IAM binding were wrong.
+    """
+
+    _db: AsyncClient
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._db = client
 
     async def create_purchase_order(self, rec: PurchaseOrderRecord) -> None:
         """File a purchase order, or refuse because one already exists.

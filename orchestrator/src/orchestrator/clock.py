@@ -156,6 +156,17 @@ class SimClock:
         self._store = store
         self._real = real if real is not None else SystemRealTime()
 
+    def real_now(self) -> datetime:
+        """Real wall-clock time. The only caller is project creation.
+
+        A brand-new project has no clock document to read, so there is nothing
+        to derive simulated time from — the anchor has to come from somewhere.
+        Exposed here rather than letting `app.py` reach for `datetime.now()`,
+        which would put a second wall-clock read in the codebase and trip the
+        guard.
+        """
+        return self._real.utc_now()
+
     async def now(self, project_id: str) -> datetime:
         """Current simulated time. Does not write.
 

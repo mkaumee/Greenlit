@@ -1,0 +1,61 @@
+rules_version = '2';
+
+// Rules for the `orders` database. Purchase orders live here and nothing else.
+//
+// ---------------------------------------------------------------------------
+// Read this before assuming these rules protect anything from the agent
+// ---------------------------------------------------------------------------
+//
+// Security rules govern the Firebase *client* SDKs — a browser holding a
+// Firebase Auth token. They do not apply to server SDKs. A service account
+// going through google-cloud-firestore bypasses every line below.
+//
+// So these rules are not what stops the agent writing an order. What stops the
+// agent is that its service account has no IAM binding on this database at
+// all, and the tick service never builds a client for it. See
+// scripts/gcp_setup.sh and OrdersRepository.
+//
+// What these rules *do* protect is the producer's own browser path: they are
+// the reason an approving human can create exactly one order per item and can
+// never rewrite one afterwards.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Producers are humans. Custom claims are set server-side by an admin;
+    // nothing a client runs can mint one for itself.
+    function isProducer() {
+      return isSignedIn() && request.auth.token.role == 'producer';
+    }
+
+    match /purchase_orders/{itemId} {
+      allow get, list: if isSignedIn();
+
+      // Keyed by item, so ordering one item from two suppliers collides with
+      // ordering it twice from one, and create() refuses both identically.
+      // The item_id check stops a client filing an order whose body claims a
+      // different item than the key it was written under.
+      allow create: if isProducer()
+                    && request.resource.data.approved_by == request.auth.uid
+                    && request.resource.data.item_id == itemId
+                    && request.resource.data.price.amount is int
+                    && request.resource.data.price.amount > 0
+                    && request.resource.data.price.currency is string;
+
+      // An order is a record of something that happened. Nothing rewrites it,
+      // including the producer who created it.
+      //
+      // Never collapse these into `allow write` — that word covers create,
+      // update and delete together, and would silently reopen both.
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

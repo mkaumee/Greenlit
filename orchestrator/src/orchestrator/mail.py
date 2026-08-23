@@ -21,6 +21,7 @@ Threading rules, which live here because getting them wrong is silent:
 """
 
 from typing import ClassVar, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,6 +35,11 @@ class RawInbound(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     message_id: str
+    """The transport's own handle. Gmail's API id — our idempotency key."""
+
+    rfc822_message_id: str = ""
+    """The ``Message-ID`` header. What a reply must quote in ``In-Reply-To``."""
+
     thread_id: str
     from_email: str
     subject: str
@@ -43,11 +49,25 @@ class RawInbound(BaseModel):
 
 
 class SentMessage(BaseModel):
-    """What came back from handing a message to the transport."""
+    """What came back from handing a message to the transport.
+
+    Two ids, because they do different jobs and are not interchangeable.
+
+    ``message_id`` is the transport's handle — for Gmail, an API id like
+    ``18f2a1c0d4e5``. It is what we key stored messages on, so redelivery after
+    a killed tick is a no-op.
+
+    ``rfc822_message_id`` is the ``Message-ID`` *header* — ``<uuid@host>``. It
+    is the only thing a mail client will match an ``In-Reply-To`` against.
+    Putting the API id there instead produces a header nothing recognises, and
+    every reply forks a new thread in the supplier's inbox. We would not notice
+    from inside, because our own routing is by ``thread_id`` and keeps working.
+    """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     message_id: str
+    rfc822_message_id: str
     thread_id: str
 
 
@@ -62,11 +82,13 @@ class MailTransport(Protocol):
         body: str,
         thread_id: str = "",
         in_reply_to: str = "",
+        references: str = "",
     ) -> SentMessage:
         """Send a message, starting a thread or continuing one.
 
-        When ``thread_id`` is given the message must land in that thread, with
-        ``In-Reply-To`` and ``References`` set from ``in_reply_to``.
+        ``in_reply_to`` and ``references`` are **RFC-822 header values**, not
+        transport ids — see ``SentMessage``. Implementations set the headers
+        verbatim and must also mint a ``Message-ID`` of their own to return.
         """
         ...
 
@@ -112,8 +134,11 @@ class InMemoryMailbox:
         body: str,
         thread_id: str = "",
         in_reply_to: str = "",
+        references: str = "",
     ) -> SentMessage:
         message_id = self._next_id("msg")
+        # Shaped like a real header so tests catch anyone conflating the two ids.
+        rfc822 = f"<{uuid4()}@local.invalid>"
         resolved_thread = thread_id or self._next_id("thread")
         self.sent.append(
             {
@@ -122,10 +147,16 @@ class InMemoryMailbox:
                 "body": body,
                 "thread_id": resolved_thread,
                 "in_reply_to": in_reply_to,
+                "references": references,
                 "message_id": message_id,
+                "rfc822_message_id": rfc822,
             }
         )
-        return SentMessage(message_id=message_id, thread_id=resolved_thread)
+        return SentMessage(
+            message_id=message_id,
+            rfc822_message_id=rfc822,
+            thread_id=resolved_thread,
+        )
 
     async def poll(self) -> list[RawInbound]:
         delivered = self._inbox
@@ -147,6 +178,7 @@ class InMemoryMailbox:
         """Queue an inbound reply for the next poll."""
         message = RawInbound(
             message_id=self._next_id("in"),
+            rfc822_message_id=f"<{uuid4()}@supplier.invalid>",
             thread_id=thread_id,
             from_email=from_email,
             subject=subject,

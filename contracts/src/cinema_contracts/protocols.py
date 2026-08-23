@@ -16,14 +16,14 @@ All four methods are ``async`` because all four make network-bound LLM calls.
 from typing import Protocol, runtime_checkable
 
 from cinema_contracts.models import (
-    BreakdownSource,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
+    ScriptSource,
 )
 
 
@@ -35,15 +35,30 @@ class AgentBrain(Protocol):
     same input, same kind of output, no writes anywhere.
     """
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
-        """Turn an uploaded shooting breakdown into a list of purchasable items.
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
+        """Read a screenplay and list every physical thing a scene needs.
 
-        Called once per upload, from the Breakdown screen. Returns drafts; the
-        producer confirms the list before anything is persisted as an item.
+        This is the job a human does with a highlighter before a shoot. The
+        script says *"he grabbed the cup and threw it at the mirror"* and the
+        answer is: cup, mirror — and the mirror is consumable, because it
+        breaks.
 
-        Return an empty list if the document contains no recognisable items.
-        Do not invent plausible-sounding line items to fill it out — a short
-        honest list is recoverable, a padded one wastes negotiation rounds on
+        Called once per upload. Returns drafts; the producer confirms the list
+        before anything is persisted as an item.
+
+        Every prop must carry at least one ``SceneMention`` quoting the line it
+        came from. That is not decoration — it is how a producer audits the list
+        instead of trusting it, and it is the cheapest possible check against a
+        prop that was never in the script. If you cannot point at a line, do not
+        report the prop.
+
+        Extract what the scene needs to *exist*, not what the prose happens to
+        mention. "He remembered his father's watch" needs no watch. "The room
+        smelled of rain" needs no rain.
+
+        Return an empty list if the document contains no recognisable props. Do
+        not pad it out with plausible-sounding set dressing — a short honest
+        list is recoverable, an invented one sends the agent off negotiating for
         things the production does not need.
         """
         ...

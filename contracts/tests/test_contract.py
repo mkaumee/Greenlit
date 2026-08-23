@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 import pytest
 from cinema_contracts import (
     AgentBrain,
-    BreakdownSource,
     CurrencyMismatchError,
     EscalationReason,
     ExtractedQuote,
@@ -23,7 +22,10 @@ from cinema_contracts import (
     NegotiationContext,
     NegotiationState,
     NextMove,
+    PropDraft,
     QuoteExtraction,
+    SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.testing import ScriptedBrain
@@ -295,14 +297,64 @@ async def test_silence_past_the_window_produces_a_chase() -> None:
     assert move.action is MoveAction.CHASE
 
 
-async def test_breakdown_parsing_returns_drafts_not_persisted_items() -> None:
-    drafts = await ScriptedBrain().parse_breakdown(
-        BreakdownSource(
-            filename="breakdown.txt",
-            mime_type="text/plain",
-            text_content="# scene 4\nArri SkyPanel S60 | lighting | 2\nSmoke machine | fx\n",
+# --------------------------------------------------------------------------- #
+# Reading a screenplay for objects
+# --------------------------------------------------------------------------- #
+
+SCRIPT = """INT. BAR - NIGHT
+
+The MAN grabbed the cup and threw it towards the mirror.
+
+EXT. STREET - DAY
+
+She lights a cigarette and checks her watch.
+"""
+
+
+async def _props() -> list[PropDraft]:
+    return await ScriptedBrain().extract_props(
+        ScriptSource(
+            filename="script.fountain", mime_type="text/plain", text_content=SCRIPT
         )
     )
-    assert [d.name for d in drafts] == ["Arri SkyPanel S60", "Smoke machine"]
-    assert drafts[0].qty == 2
-    assert drafts[1].qty == 1
+
+
+async def test_props_are_found_in_the_prose() -> None:
+    assert {p.name for p in await _props()} == {"cup", "mirror", "cigarette", "watch"}
+
+
+async def test_every_prop_quotes_the_line_it_came_from() -> None:
+    """The receipt. A producer audits the list instead of trusting it."""
+    for prop in await _props():
+        assert prop.mentions, f"{prop.name} has no scene mention"
+        assert prop.mentions[0].line.strip()
+
+
+async def test_props_are_attributed_to_the_right_scene() -> None:
+    by_name = {p.name: p for p in await _props()}
+    assert by_name["mirror"].mentions[0].scene_number == "1"
+    assert by_name["watch"].mentions[0].scene_number == "2"
+
+
+async def test_a_prop_that_gets_destroyed_is_flagged_consumable() -> None:
+    """The mirror gets smashed, so one is not enough for a day of takes."""
+    by_name = {p.name: p for p in await _props()}
+    assert by_name["mirror"].consumable
+    assert not by_name["watch"].consumable
+
+
+async def test_a_mention_cannot_have_an_empty_line() -> None:
+    """No line, no prop — the cheapest check against an invented one."""
+    with pytest.raises(ValidationError):
+        _ = SceneMention(scene_number="1", line="")
+
+
+async def test_a_script_with_no_props_returns_an_empty_list() -> None:
+    drafts = await ScriptedBrain().extract_props(
+        ScriptSource(
+            filename="s.txt",
+            mime_type="text/plain",
+            text_content="INT. VOID - NIGHT\n\nShe thinks about her childhood.\n",
+        )
+    )
+    assert drafts == []

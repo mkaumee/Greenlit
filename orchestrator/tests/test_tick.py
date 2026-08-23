@@ -12,6 +12,7 @@ The two that matter most:
   asserted against the database rather than against the state field.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import override
 
@@ -34,7 +35,11 @@ from orchestrator.records import (
     ProjectRecord,
     SupplierRecord,
 )
-from orchestrator.repository import FirestoreRepository
+from orchestrator.repository import (
+    DueNegotiation,
+    FirestoreRepository,
+    OrdersRepository,
+)
 from orchestrator.tick import TickLoop
 
 PID = "proj1"
@@ -199,8 +204,55 @@ async def test_a_counter_stays_in_the_same_email_thread(harness: _Harness) -> No
     await harness.at(T0 + timedelta(hours=6))
     _ = await harness.loop.run_tick(PID)
 
-    assert harness.mail.sent[1]["thread_id"] == thread
-    assert harness.mail.sent[1]["in_reply_to"] == harness.mail.sent[0]["message_id"]
+    opening, counter = harness.mail.sent[0], harness.mail.sent[1]
+    assert counter["thread_id"] == thread
+    assert counter["in_reply_to"] == opening["rfc822_message_id"]
+    assert counter["references"] == opening["rfc822_message_id"]
+
+
+async def test_in_reply_to_uses_the_header_id_not_the_transport_id(
+    harness: _Harness,
+) -> None:
+    """The two ids are different strings and only one of them threads.
+
+    Gmail's send returns an API handle; ``In-Reply-To`` needs the ``Message-ID``
+    header. Using the handle produces a header no client matches, so replies
+    fork into new threads — and our own routing is by thread_id, so nothing
+    inside the system would notice.
+    """
+    await harness.add_negotiation(floor=Money(amount=900))
+    _ = await harness.loop.run_tick(PID)
+    thread = harness.mail.sent[0]["thread_id"]
+    _ = harness.mail.deliver(thread_id=thread, body="RM1,250")
+    await harness.at(T0 + timedelta(hours=6))
+    _ = await harness.loop.run_tick(PID)
+
+    opening, counter = harness.mail.sent[0], harness.mail.sent[1]
+    assert opening["message_id"] != opening["rfc822_message_id"]
+    assert counter["in_reply_to"] != opening["message_id"]
+    assert counter["in_reply_to"].startswith("<")
+    assert counter["in_reply_to"].endswith(">")
+
+
+async def test_the_thread_root_is_recorded_once_and_kept(harness: _Harness) -> None:
+    """References stays bounded: root plus latest, not the whole chain."""
+    await harness.add_negotiation(floor=Money(amount=1))
+    _ = await harness.loop.run_tick(PID)
+    thread = harness.mail.sent[0]["thread_id"]
+    root = harness.mail.sent[0]["rfc822_message_id"]
+
+    moment = T0
+    for _ in range(3):
+        _ = harness.mail.deliver(thread_id=thread, body="RM1,250")
+        moment += timedelta(hours=6)
+        await harness.at(moment)
+        _ = await harness.loop.run_tick(PID)
+
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert record.thread_root_rfc822_id == root
+    assert record.last_rfc822_id == harness.mail.sent[-1]["rfc822_message_id"]
+    assert len(harness.mail.sent[-1]["references"].split()) == 2
 
 
 async def test_a_quote_at_the_floor_stops_for_a_human(harness: _Harness) -> None:
@@ -256,7 +308,9 @@ async def test_a_supplier_who_keeps_emailing_after_the_stop_changes_nothing(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_full_run_never_creates_a_purchase_order(harness: _Harness) -> None:
+async def test_a_full_run_never_creates_a_purchase_order(
+    harness: _Harness, orders_firestore: AsyncClient
+) -> None:
     """Drive a negotiation all the way to its stop and check the database.
 
     Asserted against ``purchase_orders`` rather than against the state field,
@@ -276,8 +330,12 @@ async def test_a_full_run_never_creates_a_purchase_order(harness: _Harness) -> N
         moment += timedelta(hours=6)
 
     assert await harness.state_of() is NegotiationState.READY_FOR_HUMAN
-    assert await harness.repo.get_purchase_order("item1") is None
-    assert await harness.repo.total_ordered() is None
+
+    # Checked against the orders database, which the tick loop has no client
+    # for and no method to reach. If this ever fails, the separation is gone.
+    orders = OrdersRepository(orders_firestore)
+    assert await orders.get_purchase_order("item1") is None
+    assert await orders.total_ordered() is None
 
 
 async def test_an_attachment_escalates_rather_than_guessing(harness: _Harness) -> None:
@@ -322,6 +380,16 @@ async def test_an_unreadable_reply_escalates(harness: _Harness) -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _Reaped(BaseException):
+    """Cloud Run stopping the process, not an error the loop could handle.
+
+    Deliberately a ``BaseException``. ``run_tick`` catches ``Exception`` per
+    negotiation so one bad row cannot take the project down, and a plain
+    exception here would be caught and the tick would carry on — which is the
+    opposite of the thing this test is trying to simulate.
+    """
+
+
 class _BrainThatDiesOnThirdCall(ScriptedBrain):
     """Stands in for Cloud Run reaping the instance mid-pass."""
 
@@ -335,7 +403,24 @@ class _BrainThatDiesOnThirdCall(ScriptedBrain):
     async def next_move(self, ctx: NegotiationContext) -> NextMove:
         self.calls += 1
         if self.calls == 3:
-            raise RuntimeError("instance reaped")
+            raise _Reaped("instance reaped")
+        return await super().next_move(ctx)
+
+
+class _BrainThatFailsOnThirdCall(ScriptedBrain):
+    """An ordinary failure on one negotiation — a bad model response, a 500."""
+
+    calls: int
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    @override
+    async def next_move(self, ctx: NegotiationContext) -> NextMove:
+        self.calls += 1
+        if self.calls == 3:
+            raise RuntimeError("the model returned nonsense")
         return await super().next_move(ctx)
 
 
@@ -346,6 +431,12 @@ async def test_a_tick_killed_halfway_leaves_the_rest_still_due(
 
     This is the failure the whole design is arranged around — it works on a
     laptop and only shows up during judging.
+
+    The one it was working on when the process died is *leased*, not lost: the
+    claim pushed it forward before the brain was called, so it is skipped for
+    fifteen simulated minutes and then retried. That is the deliberate trade —
+    a short delay on one negotiation, in exchange for never emailing a supplier
+    twice because two ticks overlapped.
     """
     harness = _Harness(firestore, brain=_BrainThatDiesOnThirdCall())
     await harness.setup_project()
@@ -354,20 +445,49 @@ async def test_a_tick_killed_halfway_leaves_the_rest_still_due(
             f"neg{index}", due=T0 - timedelta(hours=index + 1)
         )
 
-    with pytest.raises(RuntimeError, match="instance reaped"):
+    with pytest.raises(_Reaped):
         _ = await harness.loop.run_tick(PID)
 
     # Two negotiations got their opening mail out before the process died.
     assert len(harness.mail.sent) == 2
 
     remaining = await harness.repo.due_negotiations(T0)
-    assert len(remaining) == 3, "unprocessed negotiations must still be due"
+    assert len(remaining) == 2, "untouched negotiations must still be due"
 
-    # A fresh loop, as a new instance would be, finishes the job.
+    # A fresh loop, as a new instance would be, picks up what was never claimed.
     recovered = _Harness(firestore)
     report = await recovered.loop.run_tick(PID)
-    assert report.messages_sent == 3
+    assert report.messages_sent == 2
     assert not await recovered.repo.due_negotiations(T0)
+
+    # And the one that was mid-flight comes back once its lease runs out.
+    after_lease = T0 + timedelta(hours=1)
+    await recovered.at(after_lease)
+    final = await recovered.loop.run_tick(PID)
+    assert final.messages_sent == 1
+    assert len(recovered.mail.sent) == 3
+
+
+async def test_one_failing_negotiation_does_not_stop_the_others(
+    firestore: AsyncClient,
+) -> None:
+    """A project that stops being ticked is a negotiation that dies.
+
+    Over five days, one negotiation that reliably breaks the brain would
+    otherwise silently halt every other negotiation in the same production.
+    """
+    harness = _Harness(firestore, brain=_BrainThatFailsOnThirdCall())
+    await harness.setup_project()
+    for index in range(5):
+        await harness.add_negotiation(
+            f"neg{index}", due=T0 - timedelta(hours=index + 1)
+        )
+
+    report = await harness.loop.run_tick(PID)
+
+    assert report.messages_sent == 4, "only the broken one is skipped"
+    assert len(report.errors) == 1
+    assert "nonsense" in report.errors[0]
 
 
 async def test_a_redelivered_reply_does_not_burn_a_round(harness: _Harness) -> None:
@@ -478,3 +598,97 @@ async def test_the_next_check_is_clamped_into_something_sane(
     assert record.next_action_due_at is not None
     ahead = (record.next_action_due_at - T0).total_seconds() / 3600.0
     assert 1.0 <= ahead <= 72.0
+
+
+# --------------------------------------------------------------------------- #
+# Overlapping ticks
+# --------------------------------------------------------------------------- #
+
+
+class _RendezvousRepository(FirestoreRepository):
+    """Holds every caller at the due-queue read until they have all arrived.
+
+    Cloud Scheduler does not wait for one ``/tick`` to finish before firing the
+    next, so two ticks reading the same due row is ordinary rather than
+    exotic. Reproducing that with ``asyncio.gather`` alone would depend on how
+    the event loop happens to interleave two network calls — sometimes a race,
+    sometimes not, and a concurrency test that only sometimes tests concurrency
+    is worse than none.
+
+    The barrier makes it certain: both ticks hold the same ``update_time``
+    before either tries to claim.
+    """
+
+    _barrier: asyncio.Barrier
+
+    def __init__(self, client: AsyncClient, barrier: asyncio.Barrier) -> None:
+        super().__init__(client)
+        self._barrier = barrier
+
+    @override
+    async def due_negotiations(
+        self, now: datetime, *, limit: int = 50
+    ) -> list[DueNegotiation]:
+        due = await super().due_negotiations(now, limit=limit)
+        _ = await self._barrier.wait()
+        return due
+
+
+def _racing_loop(client: AsyncClient, barrier: asyncio.Barrier) -> _Harness:
+    harness = _Harness(client)
+    harness.repo = _RendezvousRepository(client, barrier)
+    harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
+    harness.loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), harness.mail)
+    return harness
+
+
+async def test_two_overlapping_ticks_email_the_supplier_once(
+    firestore: AsyncClient,
+) -> None:
+    """The bug this claiming exists to stop.
+
+    Both ticks see the same due negotiation, both would ask the brain, and both
+    would send an opening email — which from the supplier's inbox is
+    indistinguishable from the pestering bug already fixed in this loop, and has
+    an entirely different cause.
+
+    Exactly one email. Not "usually one".
+    """
+    setup = _Harness(firestore)
+    await setup.setup_project()
+    await setup.add_negotiation()
+
+    barrier = asyncio.Barrier(2)
+    first = _racing_loop(firestore, barrier)
+    second = _racing_loop(firestore, barrier)
+
+    reports = await asyncio.gather(first.loop.run_tick(PID), second.loop.run_tick(PID))
+
+    assert len(first.mail.sent) + len(second.mail.sent) == 1
+    assert sum(r.messages_sent for r in reports) == 1
+    assert sum(r.claims_lost for r in reports) == 1
+    assert not [error for r in reports for error in r.errors]
+
+
+async def test_the_loser_leaves_the_negotiation_alone(
+    firestore: AsyncClient,
+) -> None:
+    """Losing the claim means doing nothing at all — not a partial write.
+
+    The losing tick is still holding a stale copy of the record. Writing any of
+    it back would clobber whatever the winner just decided.
+    """
+    setup = _Harness(firestore)
+    await setup.setup_project()
+    await setup.add_negotiation()
+
+    barrier = asyncio.Barrier(2)
+    first = _racing_loop(firestore, barrier)
+    second = _racing_loop(firestore, barrier)
+    _ = await asyncio.gather(first.loop.run_tick(PID), second.loop.run_tick(PID))
+
+    record = await setup.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert record.state is NegotiationState.AWAITING_REPLY
+    assert record.last_outbound_at == T0
+    assert record.gmail_thread_id, "the winner's thread id survived"

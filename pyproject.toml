@@ -87,7 +87,7 @@ exclude = ["**/node_modules", "**/.venv", "**/__pycache__"]
 # scripts/ holds standalone tools that CI runs without installing anything.
 # Putting it on the path lets tests import them with real types instead of
 # loading them by filename and casting.
-extraPaths = ["scripts"]
+extraPaths = ["scripts", "orchestrator/tests"]
 
 # Ruff already ignores ISC001, so implicit concatenation is a deliberate team
 # choice. Leaving this on would make the two tools disagree about the same code.
@@ -96,4 +96,7 @@ reportImplicitStringConcatenation = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["contracts/tests", "orchestrator/tests", "supplier-sim/tests"]
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "orchestrator/tests"]
+# orchestrator/tests is on the path so a test can import the emulator helpers
+# from conftest by name rather than relying on pytest's rootdir insertion,
+# which basedpyright cannot see.
