@@ -74,6 +74,13 @@ jobs:
       - name: End to end
         run: make e2e
 
+      # The panel is deployed straight from web/dist by `make deploy-web`, so a
+      # build that only ever runs on the way to Firebase Hosting is a build
+      # that fails at the worst moment. tsc above type-checks it; this proves
+      # it bundles.
+      - name: Web builds
+        run: make web-build
+
       # Neither a Docker daemon nor gcloud exists on the machine this was
       # written on, so CI is where the image is actually verified. Without this
       # step the Dockerfile would be a file nobody has ever run, discovered to
