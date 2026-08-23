@@ -23,6 +23,38 @@ Budget half an hour for the first run, most of it waiting for the first build.
   binding on. One database means no guardrail, and nothing about a successful
   rules deploy would tell you.
 
+- **The project is a Firebase project**, not only a Google Cloud one:
+
+  ```bash
+  firebase projects:list | grep your-project-id
+  ```
+
+  These are two different things, and the difference stays invisible for a
+  long time. Every step in this runbook works on a project that was never
+  added to Firebase: `make deploy-rules` goes through
+  `firebaserules.googleapis.com` and the Firestore admin API, both plain GCP
+  APIs. So the project deploys, ticks, negotiates and passes
+  `verify_deploy.sh` — and then registering the web app for the panel fails,
+  days later, with
+
+  ```
+  404 Firebase project 678371873554 not found.
+  ```
+
+  about a project that plainly exists. Enabling `firebase.googleapis.com`
+  does not fix it; the API being on and the Firebase resource existing are
+  different things.
+
+  `scripts/gcp_setup.sh` now does this, so a project set up from scratch is
+  fine. For one that predates that, `firebase projects:addfirebase
+  your-project-id` adds it. If that fails, the usual cause is the CLI token
+  lacking the `firebase` OAuth scope — Cloud Shell's auto auth carries
+  `cloud-platform` but not that one — so `firebase login --reauth` first.
+  The console does the same job either way:
+  [console.firebase.google.com](https://console.firebase.google.com) → **Add
+  project** → pick the **existing** project from the dropdown rather than
+  creating a new one.
+
 ## The order matters
 
 Two steps are easy to do too late, and both fail in ways that point somewhere
