@@ -171,7 +171,31 @@ Two traps, both of which cost real time here:
   screen does not exist yet; the second means it does and Google is switched
   off. The panel spells both out on screen rather than showing the bare code.
 
-### 4. Turn real email on, once the token exists
+### 5. Seed a project, or the panel is an empty table
+
+A correct deployment with nothing in it looks broken to everyone who opens it.
+`make e2e` fills the *emulator*; this fills a deployed project:
+
+```bash
+make seed PROJECT_ID=your-project-id ARGS=--dry-run   # see the plan first
+make seed PROJECT_ID=your-project-id
+```
+
+It goes through the deployed service's own `POST /projects`,
+`/script` and `/items/confirm` rather than writing to Firestore, so a
+successful seed is also evidence the front half of the service works.
+
+Nothing needs ticking afterwards. Cloud Scheduler is already calling `/tick`
+every minute, so the loop researches the items and opens negotiations on its
+own, and the panel fills in with nobody touching the browser.
+
+**It refuses to run when `mail_backend` is not `memory`.** Seeding a
+deployment configured for real Gmail would set the agent emailing addresses
+that research invented, from a screenplay, with nobody expecting it.
+`--allow-live-mail` overrides that, and should be used only when a real
+round-trip is the point.
+
+### 6. Turn real email on, once the token exists
 
 Only after `docs/oauth-runbook.md` is done and the token is in Secret Manager:
 
