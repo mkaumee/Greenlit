@@ -125,6 +125,52 @@ gcloud iam service-accounts add-iam-policy-binding \
 
 Do not read `????` as a pass. An unchecked guardrail is not a working guardrail.
 
+### 4. Switch on Authentication, or nobody can open the panel
+
+The web panel reads Firestore from the browser, and `firestore.rules` gates
+every read behind `isSignedIn()`. Until Authentication exists and Google
+sign-in is enabled, the deployed page loads and then refuses every visitor.
+`make verify-deploy` checks both, because the first time this was missed the
+verifier reported 12 passed, 0 failed on a project where signing in was
+impossible.
+
+There is **no `firebase` command for this** — the CLI does not expose
+Authentication setup at all. Two routes, and the order matters because the
+second is impossible before the first:
+
+1. **Initialise Authentication.** Firebase console → Authentication → **Get
+   started**. That button is the whole step, and until it is pressed there is
+   no Sign-in method tab — which makes "enable the Google provider" look like
+   an instruction to a screen that does not exist. By API:
+
+   ```bash
+   P=your-project-id
+   curl -sS -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+        -H "x-goog-user-project: $P" -H "Content-Type: application/json" -d '{}' \
+        "https://identitytoolkit.googleapis.com/v2/projects/$P/identityPlatform:initializeAuth"
+   ```
+
+   An empty `{}` back means it worked.
+
+2. **Enable Google.** Console → Authentication → Sign-in method → Google →
+   Enable → support email → Save. **Do this in the console rather than by
+   API.** The API route refuses with `INVALID_CONFIG : client_id cannot be
+   empty` because it will not provision an OAuth client, while the console
+   creates one as part of enabling the provider.
+
+Two traps, both of which cost real time here:
+
+- **`x-goog-user-project` is mandatory on every Identity Toolkit call.**
+  `gcloud auth print-access-token` returns a bare user token with no project
+  attached. Firestore and Cloud Run infer one; Identity Toolkit does not.
+  Without the header the 403 reads `SERVICE_DISABLED` against a project number
+  you have never seen, and enabling the API on the right project changes
+  nothing.
+- **`auth/configuration-not-found` and `auth/operation-not-allowed` are
+  different errors.** The first means step 1 has not been done and the provider
+  screen does not exist yet; the second means it does and Google is switched
+  off. The panel spells both out on screen rather than showing the bare code.
+
 ### 4. Turn real email on, once the token exists
 
 Only after `docs/oauth-runbook.md` is done and the token is in Secret Manager:
