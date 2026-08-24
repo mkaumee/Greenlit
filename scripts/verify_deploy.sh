@@ -406,8 +406,15 @@ if ! id_token=$(gcloud auth print-access-token 2>"$auth_errfile"); then
 else
   id_token=$(tr -d '[:space:]' <<<"$id_token")
 
+  # x-goog-user-project is not optional here, and its absence is invisible
+  # until it bites. `gcloud auth print-access-token` yields a bare user token
+  # carrying no project; Firestore and Cloud Run infer one, Identity Toolkit
+  # refuses to. Without the header the 403 comes back blaming SERVICE_DISABLED
+  # on a project number you have never seen, and enabling the API on the right
+  # project cannot fix it. firebase-tools sets this header on every call.
   cfg=$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $id_token" \
+    -H "x-goog-user-project: ${PROJECT_ID}" \
     "https://identitytoolkit.googleapis.com/v2/projects/${PROJECT_ID}/config" \
     2>/dev/null || echo "000")
 
@@ -421,6 +428,7 @@ else
       # answers 404 when the provider is absent, which needs no parsing.
       idp=$(curl -sS -w $'\n%{http_code}' \
         -H "Authorization: Bearer $id_token" \
+        -H "x-goog-user-project: ${PROJECT_ID}" \
         "https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/defaultSupportedIdpConfigs/google.com" \
         2>/dev/null || printf '\n000')
       idp_code=$(tail -n1 <<<"$idp")
@@ -431,6 +439,7 @@ else
       elif [[ "$idp_code" == "200" || "$idp_code" == "404" ]]; then
         fail "Google sign-in is not enabled — the panel will refuse every visitor"
         note "curl -X POST -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+        note "  -H 'x-goog-user-project: ${PROJECT_ID}' \\"
         note "  -H 'Content-Type: application/json' -d '{\"enabled\": true}' \\"
         note "  'https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/defaultSupportedIdpConfigs?idpId=google.com'"
       else
@@ -442,6 +451,7 @@ else
       note "This is what the browser reports when nobody can sign in. Fix:"
       note "  console: Firebase → Authentication → Get started"
       note "  or:      curl -X POST -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+      note "             -H 'x-goog-user-project: ${PROJECT_ID}' \\"
       note "             -H 'Content-Type: application/json' -d '{}' \\"
       note "             'https://identitytoolkit.googleapis.com/v2/projects/${PROJECT_ID}/identityPlatform:initializeAuth'"
       ;;
