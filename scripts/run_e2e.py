@@ -35,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 from typing import override
 
 import httpx
+from _fixture import FLOOR, SCREENPLAY
 from cinema_contracts import (
     ItemBrief,
     ItemResearch,
@@ -64,21 +65,6 @@ REAL_ANCHOR = datetime(2026, 8, 12, 14, 0, tzinfo=UTC)
 TICKS = 40
 HOURS_PER_TICK = 3
 """Forty ticks at three simulated hours each is five simulated days."""
-
-SCREENPLAY = """INT. DIVE BAR - NIGHT
-
-RAZAK nurses a drink at the counter. The BARMAN watches him.
-
-RAZAK grabbed the cup and threw it towards the mirror.
-
-Glass rains down behind the bar.
-
-EXT. ALLEY - CONTINUOUS
-
-Razak lights a cigarette with a shaking hand.
-"""
-
-FLOOR = {"amount": 750, "currency": "MYR"}
 
 
 class Persona:

@@ -6,7 +6,7 @@ SHELL := /bin/bash
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
 .PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
-.PHONY: web-dev web-build deploy-web
+.PHONY: web-dev web-build deploy-web seed
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -124,6 +124,13 @@ web-build: web/node_modules/.bin/vite ## Build the panel into web/dist, which fi
 
 deploy-web: require-firebase require-project web-build ## Build and publish to Firebase Hosting
 	firebase deploy --only hosting --project $(PROJECT_ID)
+
+# Puts a screenplay into a DEPLOYED project, so the hosted panel has something
+# on it. Goes through the deployed service's own HTTP API rather than writing
+# to Firestore, so a successful seed is also evidence the deployment works.
+# It refuses to run against a deployment that sends real email.
+seed: require-gcloud require-project ## Seed a deployed project with a screenplay
+	uv run python scripts/seed_project.py --project-id $(PROJECT_ID) $(ARGS)
 
 image: ## Build the Cloud Run image (context is the repo root, deliberately)
 	docker build -t agentic-cinema:local .
