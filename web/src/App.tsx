@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 
 import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "./firebase";
 import type { User } from "./firebase";
+import { explain } from "./authErrors";
 import { useNegotiations, useProjects } from "./useNegotiations";
 import type { Money, Negotiation } from "./useNegotiations";
 
@@ -32,7 +33,7 @@ export function App() {
   const attempt = (action: () => Promise<void>) => () => {
     setError("");
     void action().catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(explain(cause));
     });
   };
 
