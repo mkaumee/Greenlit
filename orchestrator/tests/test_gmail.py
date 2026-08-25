@@ -13,6 +13,7 @@ attachment detection, marking read) is decided here.
 """
 
 import base64
+import json
 from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
@@ -23,6 +24,7 @@ from orchestrator.gmail import (
     FileTokenStore,
     GmailTransport,
     SecretManagerTokenStore,
+    client_credentials,
     token_store_for,
 )
 from orchestrator.settings import Settings, TokenBackend
@@ -418,3 +420,63 @@ def test_the_cloud_backend_is_selected_by_configuration_alone() -> None:
         token_backend=TokenBackend.SECRET_MANAGER,
     )
     assert isinstance(token_store_for(cloud), SecretManagerTokenStore)
+
+
+# --------------------------------------------------------------------------- #
+# Where the OAuth client id and secret come from
+# --------------------------------------------------------------------------- #
+#
+# The bootstrap already consented with a client file, so requiring the same two
+# strings again as environment variables was friction and a place to paste the
+# wrong thing. The fallback has to be exact: a resolver that quietly returns
+# the wrong credential fails at Google with invalid_client, which reads like a
+# revoked token rather than a lookup that went to the wrong place.
+
+
+def _client_file(tmp_path: Path, shape: str, ident: str) -> Path:
+    path = tmp_path / "client_secret.json"
+    _ = path.write_text(
+        json.dumps({shape: {"client_id": ident, "client_secret": f"{ident}-secret"}})
+    )
+    return path
+
+
+def test_explicit_settings_beat_the_client_file(tmp_path: Path) -> None:
+    """Cloud Run has no client JSON, so configuration must always win."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_id="from-env",
+        oauth_client_secret="from-env-secret",
+        oauth_client_secrets=_client_file(tmp_path, "installed", "from-file"),
+    )
+
+    assert client_credentials(settings) == ("from-env", "from-env-secret")
+
+
+def test_a_web_client_file_is_read(tmp_path: Path) -> None:
+    """The shape the Cloud Shell consent flow requires — a Web application."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=_client_file(tmp_path, "web", "web-client"),
+    )
+
+    assert client_credentials(settings) == ("web-client", "web-client-secret")
+
+
+def test_a_desktop_client_file_is_read(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=_client_file(tmp_path, "installed", "desktop"),
+    )
+
+    assert client_credentials(settings) == ("desktop", "desktop-secret")
+
+
+def test_nothing_anywhere_returns_nothing(tmp_path: Path) -> None:
+    """Not a partial credential. Callers keep their own refusal message."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=tmp_path / "absent.json",
+    )
+
+    assert client_credentials(settings) == ("", "")

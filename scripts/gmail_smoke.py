@@ -27,7 +27,12 @@ import json
 import sys
 from pathlib import Path
 
-from orchestrator.gmail import GmailTransport, build_credentials, token_store_for
+from orchestrator.gmail import (
+    GmailTransport,
+    build_credentials,
+    client_credentials,
+    token_store_for,
+)
 from orchestrator.settings import Settings, TokenBackend
 
 SUBJECT = "Greenlit — transport check"
@@ -49,19 +54,18 @@ depends on — the tick keeps its ids in Firestore like everything else.
 
 
 def _transport(settings: Settings) -> GmailTransport:
-    credentials = build_credentials(
-        token_store_for(settings),
-        settings.oauth_client_id,
-        settings.oauth_client_secret,
-    )
+    client_id, client_secret = client_credentials(settings)
+    credentials = build_credentials(token_store_for(settings), client_id, client_secret)
     return GmailTransport.from_credentials(credentials, settings)
 
 
 def _preflight(settings: Settings) -> str:
     """Why this cannot run, or "" if it can."""
-    if not settings.oauth_client_id or not settings.oauth_client_secret:
+    if not all(client_credentials(settings)):
         return (
-            "CINEMA_OAUTH_CLIENT_ID / CINEMA_OAUTH_CLIENT_SECRET are unset, so "
+            "no OAuth client id and secret. They are read from "
+            f"{settings.oauth_client_secrets} if it is there, or from "
+            "CINEMA_OAUTH_CLIENT_ID / CINEMA_OAUTH_CLIENT_SECRET. Without them "
             "the refresh token cannot be exchanged for an access token."
         )
     if (

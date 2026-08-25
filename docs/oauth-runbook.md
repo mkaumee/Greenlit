@@ -51,6 +51,11 @@ check `/health` and the tick logs, not just whether the service is up.
 Once the token exists, send one email by hand before turning `MAIL_BACKEND=gmail`
 on the deployed tick:
 
+The client id and secret are read from `.secrets/client_secret.json`
+automatically, so nothing needs exporting locally. The deployed service is
+different — no client JSON is in the image, so `CINEMA_OAUTH_CLIENT_ID` and
+`CINEMA_OAUTH_CLIENT_SECRET` are still required for `MAIL_BACKEND=gmail`.
+
 ```bash
 make gmail-smoke TO=your-second-account@gmail.com   # send one
 # reply from that mailbox, then

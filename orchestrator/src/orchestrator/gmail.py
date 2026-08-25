@@ -127,6 +127,42 @@ def token_store_for(settings: Settings) -> TokenStore:
     return FileTokenStore(settings.refresh_token_path)
 
 
+def client_credentials(settings: Settings) -> tuple[str, str]:
+    """The OAuth client id and secret, from configuration or the client file.
+
+    Explicit settings win: that is what Cloud Run has, since no client JSON is
+    baked into the image.
+
+    Otherwise they are read out of ``oauth_client_secrets`` — the same file the
+    bootstrap consented with, whose path is already configuration. Asking a
+    person to copy two strings out of a file we know how to find is friction
+    and a place to paste the wrong thing.
+
+    Handles both top-level shapes: ``installed`` for a Desktop client and
+    ``web`` for a Web-application one. Both are legitimate here — the Web shape
+    is what the Cloud Shell consent flow requires.
+
+    Returns ``("", "")`` when neither source has them, so callers keep their own
+    refusal message rather than getting a partial credential.
+    """
+    if settings.oauth_client_id and settings.oauth_client_secret:
+        return settings.oauth_client_id, settings.oauth_client_secret
+
+    try:
+        blob: dict[str, Any] = json.loads(settings.oauth_client_secrets.read_text())
+    except OSError, ValueError:
+        return "", ""
+
+    for shape in ("installed", "web"):
+        section: Any = blob.get(shape)
+        if isinstance(section, dict):
+            client_id = str(section.get("client_id") or "")
+            client_secret = str(section.get("client_secret") or "")
+            if client_id and client_secret:
+                return client_id, client_secret
+    return "", ""
+
+
 def build_credentials(
     store: TokenStore, client_id: str, client_secret: str
 ) -> Credentials:
