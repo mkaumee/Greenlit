@@ -1,0 +1,35 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+#
+# .secrets holds Gmail refresh tokens. A copy baked into an image layer stays
+# there even if a later layer deletes it, and images get pushed to a registry.
+
+.secrets/
+.env
+*.env
+
+.git/
+.github/
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Tests and their fixtures are not in the runtime image. The gate is CI's job,
+# and shipping them would mean shipping pytest.
+**/tests/
+web/
+docs/
+scripts/
+
+# supplier-sim is a uv workspace member and never runs in this image, but uv
+# still parses every member's manifest to resolve the lockfile. Its source is
+# excluded; the one file the build genuinely needs is not.
+supplier-sim/
+!supplier-sim/pyproject.toml
+
+firestore-debug.log
+*.log
+Dockerfile
+.dockerignore

@@ -77,8 +77,8 @@ class SupplierCandidate(_Frozen):
     notes: str = ""
 
 
-class BreakdownSource(_Frozen):
-    """An uploaded shooting breakdown, before it has been understood."""
+class ScriptSource(_Frozen):
+    """An uploaded screenplay, before anyone has read it for objects."""
 
     filename: str
     mime_type: str
@@ -86,16 +86,43 @@ class BreakdownSource(_Frozen):
     gcs_uri: str = ""
 
 
-class ItemDraft(_Frozen):
-    """One line the brain found in an uploaded breakdown.
+class SceneMention(_Frozen):
+    """Where a prop was spotted, and the words that put it there.
+
+    ``line`` is the receipt. A producer checking the list needs to see *"he
+    grabbed the cup and threw it at the mirror"* next to "mirror", because that
+    is the difference between auditing the agent's work and taking its word.
+    It is also the fastest way to catch a hallucinated prop: no line, no prop.
+    """
+
+    scene_number: str
+    line: str = Field(min_length=1, description="The sentence the prop came from.")
+    page: int | None = None
+
+
+class PropDraft(_Frozen):
+    """One physical thing a scene needs, as found in the script.
 
     A draft because nothing is persisted until the producer confirms the list.
     """
 
     name: str
-    category: str
-    scenes: list[str] = Field(default_factory=list)
+    category: str = "prop"
+    """prop, set dressing, costume, equipment, vehicle, ..."""
+
     qty: int = Field(ge=1, default=1)
+    mentions: list[SceneMention] = Field(default_factory=list)
+
+    consumable: bool = False
+    """True when the action destroys or uses up the object.
+
+    The mirror gets smashed; the cup might survive. A destroyed prop needs one
+    per take, not one per production, and getting that wrong is how a shoot
+    stops at lunchtime. The brain flags it here; a human decides the multiple,
+    because only they know the shooting schedule.
+    """
+
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
     notes: str = ""
 
 
@@ -107,6 +134,13 @@ class ItemBrief(_Frozen):
     category: str
     scenes: list[str] = Field(default_factory=list)
     qty: int = Field(ge=1, default=1)
+    consumable: bool = False
+    """Carried through to negotiation: it changes what we are asking to buy.
+
+    Sourcing one mirror and sourcing six identical breakaway mirrors are
+    different conversations, and the seller needs to be told which one it is.
+    """
+
     notes: str = ""
     reference_band: ReferenceBand | None = None
     currency: Currency = "MYR"

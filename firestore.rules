@@ -26,36 +26,16 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------------
-    // Purchase orders. The guardrail.
+    // Purchase orders are NOT here
     // ---------------------------------------------------------------------
     //
-    // Top-level and keyed by item_id, which is what makes the duplicate
-    // impossible rather than merely unlikely:
+    // They live in the `orders` database, under firestore.orders.rules.
     //
-    //   - `create` fails with ALREADY_EXISTS if the document is there, so a
-    //     second order for the same item is refused by the storage engine
-    //     before any application code runs.
-    //   - Because the *item* is the key, ordering one item from two different
-    //     suppliers is the same violation and is refused identically. That is
-    //     the case a per-order ID would have let through.
-    //   - `update` and `delete` are closed outright. An order, once placed, is
-    //     a record of something that happened. Nothing rewrites history.
-    //
-    // There is deliberately no `allow write` shorthand anywhere in this block.
-    // `write` covers create, update and delete together, and using it here
-    // would silently reopen the two we just closed.
-    match /purchase_orders/{itemId} {
-      allow get, list: if isSignedIn();
-
-      allow create: if isProducer()
-                    && request.resource.data.approved_by == request.auth.uid
-                    && request.resource.data.item_id == itemId
-                    && request.resource.data.price.amount is int
-                    && request.resource.data.price.amount > 0
-                    && request.resource.data.price.currency is string;
-
-      allow update, delete: if false;
-    }
+    // Not tidiness — necessity. Security rules do not apply to server SDKs, and
+    // Firestore IAM cannot grant access to one collection and withhold another.
+    // The smallest thing IAM can name is a database, so making "the agent
+    // cannot write purchase orders" true had to mean a second database the
+    // agent has no binding on. See scripts/gcp_setup.sh.
 
     // ---------------------------------------------------------------------
     // Everything else

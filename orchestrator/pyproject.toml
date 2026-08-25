@@ -10,6 +10,7 @@ dependencies = [
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
     "google-cloud-secret-manager>=2.20",
+    "firebase-admin>=7.0",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.6",

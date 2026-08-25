@@ -10,7 +10,12 @@
 .env
 .env.*
 !.env.example
+# Both spellings. The settings default is `.secrets/` (CINEMA_TOKEN_DIR), and a
+# bare `secrets/` pattern does not match a leading dot — which meant the Gmail
+# refresh token was covered by nothing at all. Check with:
+#   git check-ignore -v .secrets/gmail_refresh_token.json
 secrets/
+.secrets/
 client_secret*.json
 *credentials*.json
 *service-account*.json
@@ -50,3 +55,4 @@ emulator-data/
 .idea/
 .vscode/
 *.swp
+.pytest-all.out

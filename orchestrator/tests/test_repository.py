@@ -1,3 +1,6 @@
+# The Firestore client is only partially typed; a couple of raw client calls
+# here are deliberate, to check behaviour the repository deliberately hides.
+# pyright: reportUnknownMemberType=false
 """Firestore repository tests, against the emulator.
 
 The centrepiece is the purchase-order group. Those tests are the evidence
@@ -18,13 +21,18 @@ from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.clock import ClockState, SimClock
 from orchestrator.records import (
     ItemRecord,
+    ItemStatus,
     MessageRecord,
     NegotiationRecord,
     ProjectRecord,
     PurchaseOrderRecord,
     SupplierRecord,
 )
-from orchestrator.repository import DuplicateOrderError, FirestoreRepository
+from orchestrator.repository import (
+    DuplicateOrderError,
+    FirestoreRepository,
+    OrdersRepository,
+)
 
 PID = "proj1"
 T0 = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
@@ -78,8 +86,44 @@ def _order(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_purchase_order_can_be_created_once(firestore: AsyncClient) -> None:
-    repo = FirestoreRepository(firestore)
+def test_the_tick_loops_repository_has_no_way_to_write_an_order() -> None:
+    """Defence in depth, and the half that works without any cloud project.
+
+    In production the agent's service account has no IAM binding on the orders
+    database, which is the real control. This is the second lock: the object
+    the tick loop is handed has no method that could write an order even if
+    that binding were mistakenly granted.
+
+    Firestore rules are *not* a third lock here. They do not apply to server
+    SDKs at all, so they constrain a producer's browser and nothing else.
+    """
+    assert not hasattr(FirestoreRepository, "create_purchase_order")
+    assert not hasattr(FirestoreRepository, "total_ordered")
+    assert hasattr(OrdersRepository, "create_purchase_order")
+
+
+async def test_the_two_databases_do_not_see_each_other(
+    firestore: AsyncClient, orders_firestore: AsyncClient
+) -> None:
+    """The isolation the whole split rests on.
+
+    If a future Firestore change ever made these the same store, every other
+    guardrail test would still pass while the guarantee quietly evaporated.
+    """
+    orders = OrdersRepository(orders_firestore)
+    await orders.create_purchase_order(_order(item_id="item1"))
+
+    leaked = (
+        await firestore.collection("purchase_orders").document("item1").get()
+    ).exists
+
+    assert not leaked, "an order written to `orders` is visible from (default)"
+
+
+async def test_a_purchase_order_can_be_created_once(
+    orders_firestore: AsyncClient,
+) -> None:
+    repo = OrdersRepository(orders_firestore)
     await repo.create_purchase_order(_order())
 
     stored = await repo.get_purchase_order("item1")
@@ -89,9 +133,9 @@ async def test_a_purchase_order_can_be_created_once(firestore: AsyncClient) -> N
 
 
 async def test_a_second_order_for_the_same_item_is_refused(
-    firestore: AsyncClient,
+    orders_firestore: AsyncClient,
 ) -> None:
-    repo = FirestoreRepository(firestore)
+    repo = OrdersRepository(orders_firestore)
     await repo.create_purchase_order(_order())
 
     with pytest.raises(DuplicateOrderError) as caught:
@@ -101,7 +145,7 @@ async def test_a_second_order_for_the_same_item_is_refused(
 
 
 async def test_ordering_one_item_from_two_suppliers_is_the_same_violation(
-    firestore: AsyncClient,
+    orders_firestore: AsyncClient,
 ) -> None:
     """The reason the key is the item and not the order.
 
@@ -110,7 +154,7 @@ async def test_ordering_one_item_from_two_suppliers_is_the_same_violation(
     the item makes "same item, different supplier" collide with "same item,
     same supplier" and be refused identically.
     """
-    repo = FirestoreRepository(firestore)
+    repo = OrdersRepository(orders_firestore)
     await repo.create_purchase_order(_order(supplier_id="sup1", amount=880))
 
     with pytest.raises(DuplicateOrderError):
@@ -118,10 +162,10 @@ async def test_ordering_one_item_from_two_suppliers_is_the_same_violation(
 
 
 async def test_a_refused_order_does_not_disturb_the_one_already_there(
-    firestore: AsyncClient,
+    orders_firestore: AsyncClient,
 ) -> None:
     """``create()`` rather than ``set()``. If this ever fails, someone swapped it."""
-    repo = FirestoreRepository(firestore)
+    repo = OrdersRepository(orders_firestore)
     await repo.create_purchase_order(_order(supplier_id="sup1", amount=880))
 
     with pytest.raises(DuplicateOrderError):
@@ -133,8 +177,8 @@ async def test_a_refused_order_does_not_disturb_the_one_already_there(
     assert stored.price == Money(amount=880)
 
 
-async def test_different_items_are_independent(firestore: AsyncClient) -> None:
-    repo = FirestoreRepository(firestore)
+async def test_different_items_are_independent(orders_firestore: AsyncClient) -> None:
+    repo = OrdersRepository(orders_firestore)
     await repo.create_purchase_order(_order(item_id="item1", amount=880))
     await repo.create_purchase_order(_order(item_id="item2", amount=120))
 
@@ -142,9 +186,9 @@ async def test_different_items_are_independent(firestore: AsyncClient) -> None:
 
 
 async def test_nothing_ordered_yet_is_none_rather_than_a_guessed_zero(
-    firestore: AsyncClient,
+    orders_firestore: AsyncClient,
 ) -> None:
-    assert await FirestoreRepository(firestore).total_ordered() is None
+    assert await OrdersRepository(orders_firestore).total_ordered() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +262,92 @@ async def test_due_query_spans_projects(firestore: AsyncClient) -> None:
     due = await repo.due_negotiations(T0)
 
     assert {d.project_id for d in due} == {"projA", "projB"}
+
+
+# --------------------------------------------------------------------------- #
+# Claiming
+# --------------------------------------------------------------------------- #
+
+
+async def test_claiming_takes_a_row_out_of_the_queue(firestore: AsyncClient) -> None:
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_negotiation(PID, "n1", _negotiation(due=T0 - timedelta(hours=1)))
+
+    (due,) = await repo.due_negotiations(T0)
+    claimed = await repo.claim_negotiation(due, T0 + timedelta(minutes=15))
+
+    assert claimed
+    assert await repo.due_negotiations(T0) == []
+    assert len(await repo.due_negotiations(T0 + timedelta(hours=1))) == 1
+
+
+async def test_only_one_of_two_ticks_can_claim_the_same_row(
+    firestore: AsyncClient,
+) -> None:
+    """The whole point. Both hold the same read; Firestore admits one.
+
+    This is the deterministic version — both callers genuinely share one
+    ``update_time``, with no reliance on how the event loop happens to
+    interleave. ``test_tick.py`` has the realistic counterpart.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_negotiation(PID, "n1", _negotiation(due=T0 - timedelta(hours=1)))
+
+    (first,) = await repo.due_negotiations(T0)
+    (second,) = await repo.due_negotiations(T0)
+    assert first.update_time == second.update_time, "both ticks read the same version"
+
+    won = await repo.claim_negotiation(first, T0 + timedelta(minutes=15))
+    lost = await repo.claim_negotiation(second, T0 + timedelta(minutes=15))
+
+    assert won
+    assert not lost, "the second claim must be refused by Firestore, not by us"
+
+
+async def test_any_intervening_write_invalidates_a_claim(
+    firestore: AsyncClient,
+) -> None:
+    """Not just a competing claim — any write at all.
+
+    A producer setting a floor from the approval service also bumps the version,
+    and a tick still holding the older read must not overwrite that decision
+    with a stale record.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_negotiation(PID, "n1", _negotiation(due=T0 - timedelta(hours=1)))
+
+    (due,) = await repo.due_negotiations(T0)
+    record = await repo.get_negotiation(PID, "n1")
+    assert record is not None
+    record.floor_price = Money(amount=600)
+    await repo.save_negotiation(PID, "n1", record)
+
+    assert not await repo.claim_negotiation(due, T0 + timedelta(minutes=15))
+
+
+async def test_items_are_claimed_the_same_way(firestore: AsyncClient) -> None:
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_item(
+        PID,
+        "mirror",
+        ItemRecord(
+            name="Mirror",
+            category="prop",
+            status=ItemStatus.RESEARCHING,
+            next_action_due_at=T0 - timedelta(hours=1),
+        ),
+    )
+
+    (first,) = await repo.due_items(T0)
+    (second,) = await repo.due_items(T0)
+
+    assert await repo.claim_item(first, T0 + timedelta(minutes=15))
+    assert not await repo.claim_item(second, T0 + timedelta(minutes=15))
+    assert await repo.due_items(T0) == []
 
 
 # --------------------------------------------------------------------------- #

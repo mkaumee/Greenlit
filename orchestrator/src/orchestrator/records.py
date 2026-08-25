@@ -28,6 +28,7 @@ from cinema_contracts import (
     Money,
     NegotiationState,
     ReferenceBand,
+    SceneMention,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,15 +56,37 @@ class _Record(BaseModel):
 
 
 class ItemStatus(StrEnum):
-    """Where an item is in the procurement flow, for the breakdown screen."""
+    """Where an item is in the procurement flow, for the breakdown screen.
+
+    The first two transitions are the interesting ones::
+
+        DRAFT ──confirmed by a producer──> RESEARCHING ──> SOURCING ──> NEGOTIATING
+
+    Nothing is researched and nobody is emailed while an item is ``DRAFT``. The
+    agent has read the script and produced a list; a human still has to say
+    that list is right. Skipping that would mean a hallucinated prop quietly
+    turning into a real email to a real seller.
+    """
 
     DRAFT = "DRAFT"
+    """Found in the script, not yet confirmed by a person. Inert."""
+
     RESEARCHING = "RESEARCHING"
+    """Confirmed. Due for a reference band and supplier candidates."""
+
     SOURCING = "SOURCING"
+    """Researched. Due for negotiations to be opened."""
+
     NEGOTIATING = "NEGOTIATING"
     READY_FOR_HUMAN = "READY_FOR_HUMAN"
     ORDERED = "ORDERED"
     ABANDONED = "ABANDONED"
+    """Dropped by the producer at confirmation, or nothing could be sourced."""
+
+
+ITEM_TERMINAL_STATUSES: frozenset[ItemStatus] = frozenset(
+    {ItemStatus.ORDERED, ItemStatus.ABANDONED}
+)
 
 
 class ProjectRecord(_Record):
@@ -83,9 +106,43 @@ class ItemRecord(_Record):
     scenes: list[str] = Field(default_factory=list)
     qty: int = Field(ge=1, default=1)
     notes: str = ""
+
+    mentions: list[SceneMention] = Field(default_factory=list)
+    """The script lines this item was found in. Shown on the item detail screen
+    so a producer can see why the agent thinks the shoot needs this."""
+
+    consumable: bool = False
+    """Destroyed on camera, so the quantity is per take rather than per shoot."""
+
     reference_band: ReferenceBand | None = None
     status: ItemStatus = ItemStatus.DRAFT
     chosen_quote: ExtractedQuote | None = None
+
+    supplier_ids: list[str] = Field(default_factory=list)
+    """Sellers research found *for this item*.
+
+    Suppliers are stored per project because one company often sells several
+    things, but negotiations are opened from this list rather than from every
+    supplier in the project — otherwise finding a lighting hire firm for the
+    SkyPanel would open a negotiation with them about the smoke machine too.
+    """
+
+    floor_price: Money | None = None
+    """The producer's ceiling, set when they confirm the item.
+
+    Lives on the item rather than only on each negotiation so that every seller
+    approached for it inherits the same limit, including ones opened later.
+    """
+
+    next_action_due_at: datetime | None = None
+    """Drives the item side of the tick, exactly as it does for negotiations.
+
+    Absent while an item is ``DRAFT`` — an unconfirmed item must never be
+    picked up — and removed again once it is terminal, which drops it out of
+    the index rather than leaving a row to filter on every pass.
+    """
+
+    updated_at: datetime | None = None
 
 
 class SupplierRecord(_Record):
@@ -119,6 +176,17 @@ class NegotiationRecord(_Record):
 
     gmail_thread_id: str = ""
     last_msg_id: str = ""
+    """Gmail's API id for our last outbound. For lookups and debugging."""
+
+    thread_root_rfc822_id: str = ""
+    last_rfc822_id: str = ""
+    """RFC-822 ``Message-ID`` headers: the thread's first message, and the most
+    recent one in it.
+
+    These are what ``In-Reply-To`` and ``References`` are built from. Keeping
+    the root and the last one is bounded — a full ``References`` chain grows
+    with every round — and is enough for every mail client to thread correctly.
+    """
 
     first_quote: ExtractedQuote | None = None
     latest_quote: ExtractedQuote | None = None

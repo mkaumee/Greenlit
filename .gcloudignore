@@ -1,0 +1,47 @@
+# What `gcloud builds submit` uploads. Explicit on purpose.
+#
+# Without this file gcloud derives the filter from .gitignore, which makes the
+# contents of every Cloud Build upload a silent dependency on .gitignore being
+# correct. It was not: `secrets/` does not match `.secrets/`, so the Gmail
+# refresh token would have been shipped to Cloud Build and kept in the source
+# bucket. Naming the filter here means that mistake cannot repeat quietly.
+#
+# .gcloudignore itself must not be ignored — gcloud reads it from the upload
+# root, and the Dockerfile needs the build context it describes.
+
+# --- credentials, first and non-negotiable ------------------------------------
+.secrets/
+secrets/
+.env
+.env.*
+!.env.example
+client_secret*.json
+*credentials*.json
+*service-account*.json
+token_*.json
+*.pem
+*.p12
+
+# --- not needed to build the image --------------------------------------------
+# The Dockerfile's own .dockerignore prunes again inside the build; this only
+# decides what leaves the machine.
+.git/
+.github/
+.venv/
+node_modules/
+web/
+docs/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.claude/
+
+# Tests do not go in the runtime image, but they are cheap and keeping them out
+# of the upload keeps the build context honest about what is being shipped.
+**/tests/
+
+emulator-data/
+*.log
+.pytest-all.out

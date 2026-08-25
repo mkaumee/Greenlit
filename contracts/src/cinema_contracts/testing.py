@@ -18,16 +18,17 @@ from decimal import Decimal
 
 from cinema_contracts.enums import EscalationReason, MessageDirection, MoveAction
 from cinema_contracts.models import (
-    BreakdownSource,
     ExtractedQuote,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
     ReferenceBand,
+    SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.money import Money
@@ -41,6 +42,63 @@ _PRICE = re.compile(
 _SILENCE_HOURS = 48.0
 """How long a supplier may go quiet before the fake brain chases them."""
 
+_SCENE_HEADING = re.compile(r"^(?:SCENE\s+(\S+)|(?:INT|EXT)[.\s])", re.IGNORECASE)
+
+_PROP_WORDS = frozenset(
+    {
+        "bottle",
+        "briefcase",
+        "camera",
+        "candle",
+        "chair",
+        "cigarette",
+        "cup",
+        "glass",
+        "gun",
+        "key",
+        "knife",
+        "lamp",
+        "laptop",
+        "mirror",
+        "newspaper",
+        "phone",
+        "plate",
+        "rope",
+        "table",
+        "umbrella",
+        "vase",
+        "watch",
+    }
+)
+"""A deliberately tiny vocabulary. The real brain reads; this one recognises."""
+
+_DESTRUCTIVE = frozenset(
+    {
+        "threw",
+        "throws",
+        "throw",
+        "smash",
+        "smashes",
+        "smashed",
+        "shatter",
+        "shatters",
+        "shattered",
+        "break",
+        "breaks",
+        "broke",
+        "burn",
+        "burns",
+        "burned",
+        "tears",
+        "tore",
+        "crushes",
+        "crushed",
+        "fires",
+        "fired",
+    }
+)
+"""Verbs that mean the object does not survive the take."""
+
 
 class ScriptedBrain:
     """Rule-based stand-in for the real brain. Satisfies ``AgentBrain``."""
@@ -50,19 +108,57 @@ class ScriptedBrain:
     def __init__(self, *, anchor: Money | None = None) -> None:
         self._anchor = anchor or Money(amount=1000)
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
-        """One item per non-empty line, ``name | category | qty``."""
-        drafts: list[ItemDraft] = []
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
+        """Spot known nouns in action lines and quote the line they came from.
+
+        A keyword scan against a fixed vocabulary — nothing like what the real
+        brain will do. It exists so the pipeline has something honest to run on,
+        and so the *shape* of a correct answer is pinned: every prop carries the
+        line it was found in, and a prop hit by a destructive verb comes back
+        ``consumable``.
+        """
+        found: dict[str, list[SceneMention]] = {}
+        destroyed: set[str] = set()
+        scene = "1"
+        scene_counter = 0
+
         for raw in source.text_content.splitlines():
             line = raw.strip()
-            if not line or line.startswith("#"):
+            if not line:
                 continue
-            parts = [p.strip() for p in line.split("|")]
-            name = parts[0]
-            category = parts[1] if len(parts) > 1 else "uncategorised"
-            qty = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
-            drafts.append(ItemDraft(name=name, category=category, qty=qty))
-        return drafts
+
+            heading = _SCENE_HEADING.match(line)
+            if heading is not None:
+                scene_counter += 1
+                scene = heading.group(1) or str(scene_counter)
+                continue
+
+            lowered = line.lower()
+            is_destructive = any(verb in lowered for verb in _DESTRUCTIVE)
+            for word in _PROP_WORDS:
+                if re.search(rf"\b{word}s?\b", lowered):
+                    found.setdefault(word, []).append(
+                        SceneMention(scene_number=scene, line=line)
+                    )
+                    if is_destructive:
+                        destroyed.add(word)
+
+        return [
+            PropDraft(
+                name=word,
+                category="prop",
+                qty=1,
+                mentions=mentions,
+                consumable=word in destroyed,
+                confidence=0.4,
+                notes=(
+                    "Destroyed on camera — needs one per take."
+                    if word in destroyed
+                    else ""
+                ),
+            )
+            for word, mentions in sorted(found.items())
+        ]
 
     async def research_item(self, brief: ItemBrief) -> ItemResearch:
         """A band bracketing the anchor, with a placeholder source."""

@@ -1,8 +1,12 @@
 # Agentic Cinema
 
-An agentic procurement system for film production. A producer uploads a shooting
-breakdown; the agent researches what each item should cost, finds suppliers, and
-negotiates with them over real email across simulated days.
+An agentic procurement system for film production.
+
+Before a shoot, someone reads the screenplay looking for objects. A scene says
+*"he grabbed the cup and threw it at the mirror"*, and they write down: cup,
+mirror — and several mirrors, because it breaks. This system does that pass,
+then researches what each item costs, finds who sells it, and negotiates over
+real email across real days.
 
 It stops before spending money. Every purchase order is created by a human, and
 that limit is enforced by database rules rather than by prompt design.
@@ -33,19 +37,21 @@ project — Firestore tests run against the emulator.
 
 ## How the pieces fit
 
-The producer's agent and the supplier simulator are separate services that know
-nothing about each other except an email address. The simulator never reads our
-Firestore; if it did, this would be a simulation rather than a test, and it
-would stop being evidence the moment a real supplier was swapped in.
+Cloud Scheduler calls `/tick` every minute. Each tick reads the mailbox, files
+replies against their negotiation by Gmail thread ID, and acts on whatever is
+due. Writing a reply to Firestore is what pushes it live to the UI, so the
+screens update on their own.
 
-Time is simulated. `clock.now()` is the only source of it, so a five-day
-negotiation can be replayed in sixty seconds without any code path behaving
-differently. See `CLAUDE.md` for why that is a hard rule rather than a
+The loop is real. A negotiation runs for days because that is how long people
+take to answer email, and Firestore is the agent's memory across that gap — no
+process stays alive between an outbound message and the reply. `clock.now()` is
+the only source of time, which is what makes a multi-day negotiation testable in
+milliseconds. See `CLAUDE.md` for why that is a hard rule rather than a
 preference.
 
 ## The rules that shape the code
 
-`CLAUDE.md` holds five constraints that are load-bearing for what the demo
+`CLAUDE.md` holds five constraints that are load-bearing for what this system
 claims. The short version:
 
 - One LLM provider, `google-genai` / `google-adk`.
@@ -55,6 +61,11 @@ claims. The short version:
   updated, never deleted — so a duplicate order is refused by the storage
   engine before application code runs.
 - The agent's service account cannot write to `purchase_orders` at all.
+
+## What happens next
+
+`docs/PLAN.md` holds the phased build plan: what is done, what is not, and
+the order the rest goes in.
 
 ## Licence
 
