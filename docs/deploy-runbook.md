@@ -211,8 +211,13 @@ Approving also needs the signed-in account to carry the `producer` claim, or
 every attempt is a 403 by design:
 
 ```bash
-uv run python scripts/grant_producer.py you@example.com
+uv run python scripts/grant_producer.py --project your-project-id you@example.com
 ```
+
+`--project` is not optional against a real deployment. Without it the script
+targets `demo-cinema`, the emulator's project, and refuses rather than
+appearing to succeed — claims are per project, and one granted on the wrong
+one leaves the producer unable to approve anything with nothing to show why.
 
 ### 6. Turn real email on, once the token exists
 

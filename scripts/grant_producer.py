@@ -47,7 +47,7 @@ import sys
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials
+from firebase_admin import credentials, exceptions
 from orchestrator.auth import PRODUCER_ROLE
 from orchestrator.settings import Settings
 
@@ -91,10 +91,31 @@ def main(argv: list[str] | None = None) -> int:
     _ = parser.add_argument(
         "--list", action="store_true", help="show every user and their role"
     )
+    _ = parser.add_argument(
+        "--project",
+        default="",
+        help="the Firebase project (default: CINEMA_GCP_PROJECT, else demo-cinema)",
+    )
     args = parser.parse_args(argv)
 
     settings = Settings()
+    if args.project:
+        settings = settings.model_copy(update={"gcp_project": str(args.project)})
+
+    # Claims are per project, and gcp_project defaults to the emulator's
+    # demo-cinema. Run this against a real deployment without saying so and
+    # firebase-admin asks Google about a project that does not exist, which
+    # surfaces as PROJECT_NOT_FOUND under a stack trace that never names the
+    # project it used. Say it out loud instead.
     emulated = _connect(settings)
+    if not emulated and settings.gcp_project == "demo-cinema":
+        print("Refusing: this would grant the claim on 'demo-cinema'.")
+        print("  That is the emulator's project, not a deployment.")
+        print("  Name the real one:")
+        print(
+            f"    {sys.argv[0]} --project your-project-id {args.email or 'you@example.com'}"
+        )
+        return 2
     where = (
         f"the Auth emulator at {os.environ['FIREBASE_AUTH_EMULATOR_HOST']}"
         if emulated
@@ -118,6 +139,14 @@ def main(argv: list[str] | None = None) -> int:
     except firebase_auth.UserNotFoundError:
         print(f"No user {email} in {where}.")
         print("They have to sign in to the app once before they can be granted.")
+        return 1
+    except exceptions.FirebaseError as cause:
+        # Wrong project, no credentials, Auth not initialised — all of which
+        # arrive as one backend error. Printing it beats a traceback that never
+        # names the project it was talking to.
+        print(f"Auth refused the lookup in {where}: {cause}")
+        print("  · wrong project?   --project your-project-id")
+        print("  · no credentials?  gcloud auth application-default login")
         return 1
 
     if args.revoke:
