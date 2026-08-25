@@ -32,9 +32,11 @@ negotiations on its own — and the panel fills in with nobody touching it.
 # pyright: reportAny=false
 
 import argparse
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 from _fixture import FLOOR, SCREENPLAY
@@ -47,24 +49,59 @@ SIM_START = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 screenshot of one is legible next to the other."""
 
 
-def _gcloud(*args: str) -> str:
-    """Run gcloud and return stdout, or "" if it failed.
+def _outside_venv() -> dict[str, str]:
+    """The environment with this venv removed.
 
-    stderr is captured separately rather than merged. Folding gcloud's warnings
-    into a value that ends up in an HTTP header is how this project previously
-    produced `curl: (43)` and spent an afternoon reading it as a permissions
-    problem.
+    gcloud is itself a Python program and finds its interpreter from the
+    environment. Run from inside `uv run`, it picks up the workspace venv —
+    Python 3.14, which gcloud does not support — and fails to start. The
+    symptom is not a Python error but a gcloud that simply exits non-zero, so
+    from the caller it looks exactly like "that service does not exist".
+
+    Everything that shells out to gcloud from Python needs this. The shell
+    scripts do not, which is why `verify_deploy.sh` found the service in the
+    same terminal where this script could not.
+    """
+    env = dict(os.environ)
+    venv = env.pop("VIRTUAL_ENV", "")
+    _ = env.pop("PYTHONHOME", None)
+    _ = env.pop("PYTHONPATH", None)
+    if venv:
+        bin_dir = str(Path(venv) / "bin")
+        env["PATH"] = os.pathsep.join(
+            part for part in env.get("PATH", "").split(os.pathsep) if part != bin_dir
+        )
+    return env
+
+
+def _gcloud(*args: str) -> tuple[str, str]:
+    """Run gcloud. Returns (stdout, error) — exactly one of them is non-empty.
+
+    The error is *returned* rather than swallowed. An earlier version of this
+    helper returned "" on any failure, so a gcloud that could not even start
+    was reported to the user as "could not find the cinema-tick service" —
+    confidently, and about a service that was running. This project has now
+    made that same mistake three times (a discarded `addfirebase` stderr, a
+    `curl: (43)` from a token merged with a warning, and this): a helper that
+    hides why something failed produces guessing, and the guess reads as fact.
+
+    stderr is captured separately rather than merged into stdout, so a value
+    used later — a URL, a token — can never carry a warning line into it.
     """
     done = subprocess.run(
         ["gcloud", *args],
         capture_output=True,
         text=True,
         check=False,
+        env=_outside_venv(),
     )
-    return done.stdout.strip() if done.returncode == 0 else ""
+    if done.returncode == 0:
+        return done.stdout.strip(), ""
+    detail = done.stderr.strip() or f"gcloud exited {done.returncode}"
+    return "", detail
 
 
-def discover_url(project_id: str) -> str:
+def discover_url(project_id: str) -> tuple[str, str]:
     return _gcloud(
         "run",
         "services",
@@ -76,7 +113,7 @@ def discover_url(project_id: str) -> str:
     )
 
 
-def identity_token() -> str:
+def identity_token() -> tuple[str, str]:
     """The tick service is private. This is how verify_deploy.sh reaches it."""
     return _gcloud("auth", "print-identity-token")
 
@@ -188,11 +225,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    target: str = args.target or discover_url(args.project_id)
+    target: str = args.target
     if not target:
-        print(f"could not find the {TICK_SERVICE} service in {args.project_id}.")
-        print(f"  gcloud run services list --project={args.project_id}")
-        return 2
+        target, why = discover_url(args.project_id)
+        if not target:
+            print(f"could not reach the {TICK_SERVICE} service in {args.project_id}.")
+            print(f"  gcloud said: {why}")
+            print(
+                f"  check it exists: gcloud run services list --project={args.project_id}"
+            )
+            print("  or skip discovery entirely: --target https://...")
+            return 2
 
     print(f"\nTarget    {target}")
     print(f"Project   {args.project_name}  ({args.title})")
@@ -203,9 +246,10 @@ def main() -> int:
         print("Would create the project, upload the screenplay, confirm every prop.")
         return 0
 
-    token = identity_token()
+    token, why = identity_token()
     if not token:
         print("could not mint an identity token — the tick service is private.")
+        print(f"  gcloud said: {why}")
         print("  gcloud auth login")
         return 2
 
