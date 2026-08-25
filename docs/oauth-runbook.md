@@ -46,6 +46,27 @@ What makes this survivable is noticing quickly. An expired token surfaces as
 `invalid_grant`, which the tick reports as an error rather than a crash — so
 check `/health` and the tick logs, not just whether the service is up.
 
+## Prove it before the loop uses it
+
+Once the token exists, send one email by hand before turning `MAIL_BACKEND=gmail`
+on the deployed tick:
+
+```bash
+make gmail-smoke TO=your-second-account@gmail.com   # send one
+# reply from that mailbox, then
+make gmail-smoke POLL=1                             # read it back
+```
+
+The transport has always been green against a fake. This is the first thing
+that hands a message to Google, and doing it in isolation means a wrong scope
+or a broken header costs you one email you sent deliberately, rather than four
+the deployed loop sent to suppliers while you were not watching.
+
+**What counts as passing is the threading**, not the arrival. `poll` reports
+whether the reply carries the same Gmail `thread_id` as the message we sent. A
+reply that lands in its own thread cannot be filed against a negotiation, and
+from the panel that is indistinguishable from a supplier who never answered.
+
 ## The mailboxes
 
 Two Google accounts, neither of them your personal one:
@@ -74,6 +95,21 @@ poor choice for it.
    - Application type: **Desktop app**.
    - Download the JSON and save it as `.secrets/client_secret.json`.
      That directory is gitignored; keep it that way.
+
+## Where the bootstrap has to run
+
+**On a machine with a browser — your laptop, not Cloud Shell.**
+
+`scripts/oauth_bootstrap.py` uses `flow.run_local_server(port=0)`, which starts
+a local web server and waits for a browser on the *same machine* to complete
+consent. Cloud Shell has no browser on the VM, so this cannot work there.
+
+There is no way around it: Google shut off the console/out-of-band flow in
+2023, so `run_console()` no longer exists as an option for new clients.
+
+Run it on the laptop with `CINEMA_TOKEN_BACKEND=secret-manager` and the token
+lands straight in Secret Manager, where Cloud Run reads it. The laptop needs
+`gcloud auth application-default login` first.
 
 ## Minting a token
 
