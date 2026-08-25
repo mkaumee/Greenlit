@@ -340,9 +340,9 @@ def test_the_real_brain_is_built_with_the_configured_model(
         Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
             brain_backend=BrainBackend.MAIN_AGENT,
-            gemini_model="gemini-2.5-pro",
+            gemini_model="gemini-3.7-pro",
         )
     )
 
     assert isinstance(brain, FakeBrain)
-    assert seen["model"] == "gemini-2.5-pro", "the configured model must reach it"
+    assert seen["model"] == "gemini-3.7-pro", "the configured model must reach it"

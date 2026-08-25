@@ -102,7 +102,7 @@ APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
 # live email to a real seller reads badly, you want to know whether it was the
 # reasoning or the transport.
 BRAIN_BACKEND="${BRAIN_BACKEND:-scripted}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.7-flash}"
 
 # The panel is served from Firebase Hosting and this service from Cloud Run, so
 # every approval a producer makes is a cross-origin POST. Without these origins

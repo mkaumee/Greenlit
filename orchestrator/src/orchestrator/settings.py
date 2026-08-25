@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     email. ``/health`` reports which one is live for that reason.
     """
 
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.7-flash"
     """Which Gemini model Role A's brain reasons with.
 
     Configuration rather than a literal, and passed explicitly rather than read
