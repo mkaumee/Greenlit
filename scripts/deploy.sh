@@ -91,6 +91,19 @@ TOKEN_SECRET="${TOKEN_SECRET:-gmail-agent-refresh-token}"
 TICK_SERVICE="${TICK_SERVICE:-cinema-tick}"
 APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
 
+# Which reasoning runs. Defaults to the fake for the same reason mail defaults
+# to memory: shipping the wrong one is silent. A regex writing negotiation
+# emails looks like a working system until somebody reads one, so switching to
+# Role A's brain is an explicit choice:
+#
+#   BRAIN_BACKEND=main-agent ./scripts/deploy.sh
+#
+# Do not turn this and MAIL_BACKEND=gmail on in the same deploy. If the first
+# live email to a real seller reads badly, you want to know whether it was the
+# reasoning or the transport.
+BRAIN_BACKEND="${BRAIN_BACKEND:-scripted}"
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+
 # The panel is served from Firebase Hosting and this service from Cloud Run, so
 # every approval a producer makes is a cross-origin POST. Without these origins
 # the browser refuses at the preflight, before any route runs, and the console
@@ -346,6 +359,8 @@ say "Cloud Run"
 TICK_ENV="CINEMA_GCP_PROJECT=${PROJECT_ID}"
 TICK_ENV="${TICK_ENV}@CINEMA_ORDERS_DATABASE=${ORDERS_DB}"
 TICK_ENV="${TICK_ENV}@CINEMA_MAIL_BACKEND=${MAIL_BACKEND}"
+TICK_ENV="${TICK_ENV}@CINEMA_BRAIN_BACKEND=${BRAIN_BACKEND}"
+TICK_ENV="${TICK_ENV}@CINEMA_GEMINI_MODEL=${GEMINI_MODEL}"
 TICK_ENV="${TICK_ENV}@CINEMA_TOKEN_BACKEND=secret-manager"
 TICK_ENV="${TICK_ENV}@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}"
 TICK_ENV="${TICK_ENV}@CINEMA_LOG_FORMAT=json"

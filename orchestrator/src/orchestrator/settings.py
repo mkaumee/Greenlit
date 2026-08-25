@@ -121,6 +121,15 @@ class Settings(BaseSettings):
     email. ``/health`` reports which one is live for that reason.
     """
 
+    gemini_model: str = "gemini-2.5-flash"
+    """Which Gemini model Role A's brain reasons with.
+
+    Configuration rather than a literal, and passed explicitly rather than read
+    from the environment inside main-agent — GeminiAgentBrain requires it as a
+    keyword for exactly that reason, so a test can substitute a model without
+    touching domain code. Only read when brain_backend is main-agent.
+    """
+
     mail_backend: MailBackend = MailBackend.MEMORY
     """Defaults to memory on purpose.
 

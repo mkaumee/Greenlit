@@ -110,13 +110,17 @@ def build_brain(settings: Settings) -> AgentBrain:
                 "branch; add it to the uv workspace members after merging."
             ) from exc
 
-        brain: object = module.Brain()
+        brain: object = module.GeminiAgentBrain(model=settings.gemini_model)
         if not isinstance(brain, AgentBrain):
             raise RuntimeError(
-                "main_agent.Brain does not satisfy the AgentBrain protocol. "
-                "Checked at startup rather than on the first tick, because a "
-                "missing method would otherwise surface days into a negotiation."
+                "main_agent.GeminiAgentBrain does not satisfy the AgentBrain "
+                "protocol. Checked at startup rather than on the first tick, "
+                "because a missing method would otherwise surface days into a "
+                "negotiation."
             )
+        log.info(
+            "brain", extra={"backend": "main-agent", "model": settings.gemini_model}
+        )
         return brain
 
     log.warning(
