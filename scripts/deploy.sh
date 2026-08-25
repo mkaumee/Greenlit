@@ -292,7 +292,7 @@ if gcloud artifacts repositories describe "$REPO" \
 else
   gcloud artifacts repositories create "$REPO" \
     --repository-format=docker --location="$REGION" \
-    --description="Agentic Cinema images" >/dev/null
+    --description="Greenlit images" >/dev/null
   ok "artifact registry $REPO"
 fi
 

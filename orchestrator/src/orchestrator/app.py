@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         services.client.close()
 
 
-app = FastAPI(title="Agentic Cinema orchestrator", lifespan=lifespan)
+app = FastAPI(title="Greenlit orchestrator", lifespan=lifespan)
 
 
 def services_of(request: Request) -> Services:

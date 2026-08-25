@@ -380,6 +380,92 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say "6. A human can actually sign in"
+# ---------------------------------------------------------------------------
+#
+# Added after this script reported 12 passed, 0 failed on a project where
+# signing in was impossible. Every check above concerns the agent; none of them
+# noticed that Firebase Authentication had never been switched on, so the panel
+# deployed, served, and refused every visitor with
+# `auth/configuration-not-found`.
+#
+# Two separate facts, and they fail differently:
+#   - the Identity Toolkit config exists at all  (the console's "Get started")
+#   - google.com is present and enabled          (the provider toggle)
+#
+# Neither has a gcloud subcommand. Straight to the REST API, as with check 3 —
+# and for the same reason, the token is captured with stderr going to a file
+# rather than merged with 2>&1. Folding a warning into the token yields an
+# Authorization header with a newline in it, which curl rejects with error 43
+# in a way that looks nothing like the auth problem it actually is.
+
+auth_errfile=$(mktemp)
+if ! id_token=$(gcloud auth print-access-token 2>"$auth_errfile"); then
+  huh "could not mint an access token to query Identity Toolkit"
+  note "$(tr '\n' ' ' <"$auth_errfile" | head -c 200)"
+else
+  id_token=$(tr -d '[:space:]' <<<"$id_token")
+
+  # x-goog-user-project is not optional here, and its absence is invisible
+  # until it bites. `gcloud auth print-access-token` yields a bare user token
+  # carrying no project; Firestore and Cloud Run infer one, Identity Toolkit
+  # refuses to. Without the header the 403 comes back blaming SERVICE_DISABLED
+  # on a project number you have never seen, and enabling the API on the right
+  # project cannot fix it. firebase-tools sets this header on every call.
+  cfg=$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $id_token" \
+    -H "x-goog-user-project: ${PROJECT_ID}" \
+    "https://identitytoolkit.googleapis.com/v2/projects/${PROJECT_ID}/config" \
+    2>/dev/null || echo "000")
+
+  case "$cfg" in
+    200)
+      pass "Firebase Authentication is initialised"
+
+      # The single provider, not the list. The list response nests the id
+      # inside a resource name and guessing at that shape is how this script
+      # previously grew a check that never tested anything. A direct GET
+      # answers 404 when the provider is absent, which needs no parsing.
+      idp=$(curl -sS -w $'\n%{http_code}' \
+        -H "Authorization: Bearer $id_token" \
+        -H "x-goog-user-project: ${PROJECT_ID}" \
+        "https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/defaultSupportedIdpConfigs/google.com" \
+        2>/dev/null || printf '\n000')
+      idp_code=$(tail -n1 <<<"$idp")
+      idp_body=$(sed '$d' <<<"$idp")
+
+      if [[ "$idp_code" == "200" ]] && grep -q '"enabled":[[:space:]]*true' <<<"$idp_body"; then
+        pass "Google sign-in is enabled"
+      elif [[ "$idp_code" == "200" || "$idp_code" == "404" ]]; then
+        fail "Google sign-in is not enabled — the panel will refuse every visitor"
+        note "curl -X POST -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+        note "  -H 'x-goog-user-project: ${PROJECT_ID}' \\"
+        note "  -H 'Content-Type: application/json' -d '{\"enabled\": true}' \\"
+        note "  'https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/defaultSupportedIdpConfigs?idpId=google.com'"
+      else
+        huh "could not read the Google provider config (HTTP $idp_code)"
+      fi
+      ;;
+    404)
+      fail "Firebase Authentication was never switched on (auth/configuration-not-found)"
+      note "This is what the browser reports when nobody can sign in. Fix:"
+      note "  console: Firebase → Authentication → Get started"
+      note "  or:      curl -X POST -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+      note "             -H 'x-goog-user-project: ${PROJECT_ID}' \\"
+      note "             -H 'Content-Type: application/json' -d '{}' \\"
+      note "             'https://identitytoolkit.googleapis.com/v2/projects/${PROJECT_ID}/identityPlatform:initializeAuth'"
+      ;;
+    *)
+      # Never pass on a shrug. 403 here usually means identitytoolkit is not
+      # enabled, which is a different problem from Auth being absent.
+      huh "could not read the Identity Toolkit config (HTTP $cfg)"
+      note "gcloud services enable identitytoolkit.googleapis.com --project $PROJECT_ID"
+      ;;
+  esac
+fi
+rm -f "$auth_errfile"
+
+# ---------------------------------------------------------------------------
 printf '\n\033[1m%s\033[0m\n' "Result"
 printf '  %d passed, %d failed, %d could not be determined\n' \
   "$PASSED" "$FAILED" "$UNKNOWN"

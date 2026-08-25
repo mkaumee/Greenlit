@@ -69,7 +69,7 @@ Verified, not assumed — every claim below is covered by a test in the repo.
 | **Phase 2** — script upload, prop confirmation, research, negotiation creation | Done |
 | **Phase 4** — auth, approval service, rules tests | Done |
 | **Phase 3** — deploy | **Done and verified against real infrastructure** |
-| **Phase 5** — instrument panel | Built and driven; needs a Firebase web app registered before it can point at production |
+| **Phase 5** — instrument panel | **Done.** Live at encoded-phalanx-505503-v8.web.app, Google sign-in working |
 
 229 Python tests, plus 27 rules tests in `web/`. CI fails the build if any
 Python test skips, since a green run that skipped the guardrail tests is worse
@@ -434,6 +434,39 @@ Three things worth carrying forward:
   messages, because a subcollection write does not fire the parent's listener.
   Fine while the tick writes both together.
 
+### DONE — hosted, and signed into
+
+Live at `https://encoded-phalanx-505503-v8.web.app`. The deployed bundle hash
+matched a local rebuild byte for byte, so what is served is the committed
+source.
+
+Getting there took most of a day, all of it in Google's console rather than in
+code, and every step of it is now written down in `docs/deploy-runbook.md`
+sections 4 and 5. The three findings worth keeping:
+
+- **A Google Cloud project is not a Firebase project.** Everything in Phase 3
+  passes on one that was never added to Firebase — `deploy-rules` goes through
+  plain GCP APIs. The first thing to need the Firebase resource was the web
+  app, days later, failing with "404 project not found" about a project that
+  plainly exists. `gcp_setup.sh` now does it.
+- **`x-goog-user-project` is mandatory on Identity Toolkit calls.** Without it
+  the 403 blames `SERVICE_DISABLED` on an unrelated project number, and
+  enabling the API on the right project changes nothing.
+- **Authentication must be initialised before a provider can be enabled**, and
+  the Sign-in method tab does not exist until it is — which makes "enable
+  Google" read as an instruction to a screen that is not there. Enabling the
+  provider must happen in the console; the API refuses with `client_id cannot
+  be empty` rather than provisioning an OAuth client.
+
+`verify_deploy.sh` gained a sixth check for both auth facts, because it
+reported 12 passed, 0 failed on a project where signing in was impossible.
+
+### Seeding — done
+
+`make seed PROJECT_ID=...` puts the same screenplay `make e2e` uses into a
+deployed project, through the service's own endpoints. It refuses to run when
+`mail_backend` is not `memory`.
+
 ### Still outstanding
 
 - **Register a Firebase web app and paste its config in.** Until then
@@ -442,7 +475,7 @@ Three things worth carrying forward:
   SDK if pointed at production:
 
   ```bash
-  firebase apps:create web "Agentic Cinema" --project $PROJECT_ID
+  firebase apps:create web "Greenlit" --project $PROJECT_ID
   firebase apps:sdkconfig web --project $PROJECT_ID
   ```
 

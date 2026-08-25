@@ -6,7 +6,7 @@ SHELL := /bin/bash
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
 .PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
-.PHONY: web-dev web-build deploy-web
+.PHONY: web-dev web-build deploy-web seed
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -104,21 +104,36 @@ deploy: require-gcloud require-project ## Deploy both Cloud Run services and the
 verify-deploy: require-gcloud require-project ## Check a deployment — read-only, and the real definition of done
 	PROJECT_ID=$(PROJECT_ID) ./scripts/verify_deploy.sh
 
+# vite lives in web/node_modules, which a fresh clone does not have. Without
+# this the first build on a new machine fails with `sh: vite: command not
+# found` — which names neither the missing package nor which of the two npm
+# projects in this repo is missing it. A file target rather than a phony one,
+# so it runs exactly when the binary is absent and never otherwise.
+web/node_modules/.bin/vite:
+	cd web && npm ci
+
 # The panel reads Firestore from the browser, so it needs an emulator with
 # something in it. `make e2e` fills one with a project, four items and twelve
 # negotiations — run that first, then this, and the screen has content from the
 # first paint. Drop VITE_USE_EMULATOR to point at the real project instead.
-web-dev: ## Serve the instrument panel against the local emulators
+web-dev: web/node_modules/.bin/vite ## Serve the instrument panel against the local emulators
 	cd web && VITE_USE_EMULATOR=1 npm run dev
 
-web-build: ## Build the panel into web/dist, which firebase.json serves
+web-build: web/node_modules/.bin/vite ## Build the panel into web/dist, which firebase.json serves
 	cd web && npm run build
 
 deploy-web: require-firebase require-project web-build ## Build and publish to Firebase Hosting
 	firebase deploy --only hosting --project $(PROJECT_ID)
 
+# Puts a screenplay into a DEPLOYED project, so the hosted panel has something
+# on it. Goes through the deployed service's own HTTP API rather than writing
+# to Firestore, so a successful seed is also evidence the deployment works.
+# It refuses to run against a deployment that sends real email.
+seed: require-gcloud require-project ## Seed a deployed project with a screenplay
+	uv run python scripts/seed_project.py --project-id $(PROJECT_ID) $(ARGS)
+
 image: ## Build the Cloud Run image (context is the repo root, deliberately)
-	docker build -t agentic-cinema:local .
+	docker build -t greenlit:local .
 
 clean:
 	rm -rf .pytest_cache .ruff_cache **/__pycache__ web/dist

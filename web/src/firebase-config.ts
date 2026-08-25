@@ -13,16 +13,23 @@
  *
  * To fill it in:
  *
- *     firebase apps:create web "Agentic Cinema" --project <project-id>
+ *     firebase apps:create web "Greenlit" --project <project-id>
  *     firebase apps:sdkconfig web --project <project-id>
  */
 
 export const firebaseConfig = {
-  apiKey: "REPLACE_ME",
-  authDomain: "REPLACE_ME.firebaseapp.com",
-  projectId: "REPLACE_ME",
-  appId: "REPLACE_ME",
+  apiKey: "AIzaSyAk-gfb1xMWv_xpQQsTtpSYUllaFiJwdzo",
+  authDomain: "encoded-phalanx-505503-v8.firebaseapp.com",
+  projectId: "encoded-phalanx-505503-v8",
+  storageBucket: "encoded-phalanx-505503-v8.firebasestorage.app",
+  messagingSenderId: "678371873554",
+  appId: "1:678371873554:web:ee6bce34a861e1d163d9cb",
 } as const;
+
+// `measurementId` from the console block is deliberately absent. It is only
+// read by getAnalytics(), which this app does not call and should not: a debug
+// panel for two people does not need another SDK or the cookies that come with
+// it.
 
 /** The project the emulators run under — see the Makefile's `emulator` target. */
 export const EMULATOR_PROJECT = "demo-cinema";
