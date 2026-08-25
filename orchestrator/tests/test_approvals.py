@@ -8,6 +8,7 @@ Nothing overrides the auth dependency — an approval test that injected its own
 that matters about this service, which is who is allowed to reach it.
 """
 
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
 import httpx
@@ -15,7 +16,7 @@ import pytest
 from cinema_contracts import ClockMode, ExtractedQuote, Money, NegotiationState
 from conftest import AUTH_HOST, TokenMinter
 from google.cloud.firestore_v1 import AsyncClient
-from orchestrator.approvals import ApprovalServices, app
+from orchestrator.approvals import ALLOWED_ORIGINS, ApprovalServices, app
 from orchestrator.auth import init_firebase
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
 from orchestrator.records import (
@@ -119,6 +120,23 @@ async def api(
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     )
+
+
+@pytest.fixture
+def allow_origins() -> Iterator[Callable[[list[str]], None]]:
+    """Set the origins the approval service accepts, for one test.
+
+    ``lifespan`` fills this from settings at startup; the ASGI transport here
+    drives the app directly, so tests set it the same way — in place, because
+    the middleware holds the list by reference.
+    """
+    before = list(ALLOWED_ORIGINS)
+
+    def _set(origins: list[str]) -> None:
+        ALLOWED_ORIGINS[:] = origins
+
+    yield _set
+    ALLOWED_ORIGINS[:] = before
 
 
 def _as(token: str) -> dict[str, str]:
@@ -731,3 +749,72 @@ async def test_health_says_whether_tokens_are_really_being_verified(
     assert body["status"] == "ok"
     assert body["orders_database"] == "orders"
     assert body["auth_emulator"] == AUTH_HOST
+
+
+# --------------------------------------------------------------------------- #
+# Reaching it from a browser
+# --------------------------------------------------------------------------- #
+#
+# The panel is served from Firebase Hosting and this service runs on Cloud Run,
+# so every approval a producer makes is a cross-origin POST. The browser sends
+# a preflight OPTIONS first and refuses to make the real request if the answer
+# is wrong — before any route runs, and with a console message that says
+# nothing about approvals. Found while planning the Approve button: there was
+# no CORS middleware at all, so the button could never have worked.
+
+
+async def test_the_panels_origin_may_preflight_an_approval(
+    api: httpx.AsyncClient, allow_origins: Callable[[list[str]], None]
+) -> None:
+    panel = "https://encoded-phalanx-505503-v8.web.app"
+    allow_origins([panel])
+
+    reply = await api.options(
+        "/items/mirror/approve",
+        headers={
+            "Origin": panel,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert reply.status_code == 200
+    assert reply.headers["access-control-allow-origin"] == panel
+
+
+async def test_an_unknown_origin_is_refused(
+    api: httpx.AsyncClient, allow_origins: Callable[[list[str]], None]
+) -> None:
+    """The one service that can spend money does not answer any page that asks.
+
+    A permissive default is the kind of thing that reaches production because
+    nothing visibly breaks, so the refusal is asserted rather than assumed.
+    """
+    allow_origins(["https://encoded-phalanx-505503-v8.web.app"])
+
+    reply = await api.options(
+        "/items/mirror/approve",
+        headers={
+            "Origin": "https://not-ours.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert "access-control-allow-origin" not in reply.headers
+
+
+async def test_no_origin_is_allowed_by_default(
+    api: httpx.AsyncClient, allow_origins: Callable[[list[str]], None]
+) -> None:
+    """Configured with nothing, it answers nobody. Same posture as memory mail."""
+    allow_origins([])
+
+    reply = await api.options(
+        "/items/mirror/approve",
+        headers={
+            "Origin": "https://encoded-phalanx-505503-v8.web.app",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert "access-control-allow-origin" not in reply.headers

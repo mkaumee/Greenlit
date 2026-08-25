@@ -91,6 +91,13 @@ TOKEN_SECRET="${TOKEN_SECRET:-gmail-agent-refresh-token}"
 TICK_SERVICE="${TICK_SERVICE:-cinema-tick}"
 APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
 
+# The panel is served from Firebase Hosting and this service from Cloud Run, so
+# every approval a producer makes is a cross-origin POST. Without these origins
+# the browser refuses at the preflight, before any route runs, and the console
+# error says nothing about approvals. Both default hosting domains, because
+# Firebase serves the same site on each.
+ALLOWED_ORIGINS="${CINEMA_ALLOWED_ORIGINS:-https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com}"
+
 # `memory` unless explicitly asked otherwise. See the header.
 MAIL_BACKEND="${MAIL_BACKEND:-memory}"
 OAUTH_CLIENT_ID="${CINEMA_OAUTH_CLIENT_ID:-}"
@@ -388,7 +395,7 @@ gcloud run deploy "$APPROVALS_SERVICE" \
   --timeout=60s \
   --max-instances=2 \
   --memory=512Mi \
-  --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_ORDERS_DATABASE=${ORDERS_DB}@CINEMA_LOG_FORMAT=json" \
+  --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_ORDERS_DATABASE=${ORDERS_DB}@CINEMA_LOG_FORMAT=json@CINEMA_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}" \
   --quiet >/dev/null
 ok "$APPROVALS_SERVICE  (orchestrator.approvals:app, as $APPROVALS_SA)"
 

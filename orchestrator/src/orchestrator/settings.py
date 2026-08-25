@@ -146,6 +146,23 @@ class Settings(BaseSettings):
 
     # -- approvals ---------------------------------------------------------- #
 
+    allowed_origins: str = ""
+    """Comma-separated browser origins the approval service will answer.
+
+    Empty by default, which means no cross-origin call succeeds — the same
+    posture as ``mail_backend`` defaulting to ``memory``. A service that
+    approves purchases should not accept a request from any page that happens
+    to know its URL, and a permissive default is exactly the kind of thing that
+    survives to production because nothing visibly breaks.
+
+    The tick service has no CORS at all: Cloud Run IAM refuses anonymous
+    callers before FastAPI sees them, and no browser is meant to reach it.
+    """
+
+    @property
+    def origin_list(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
     auth_emulator_host: str = ""
     """Mirrors FIREBASE_AUTH_EMULATOR_HOST, for reporting on /health.
 
