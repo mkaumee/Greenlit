@@ -13,7 +13,7 @@
 #
 # Build from the repository root, never from orchestrator/:
 #
-#   docker build -t agentic-cinema .
+#   docker build -t greenlit .
 #
 # `contracts` is a uv workspace member reached by a path dependency, so a build
 # context of orchestrator/ cannot see it and the sync fails.

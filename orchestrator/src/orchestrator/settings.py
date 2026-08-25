@@ -90,7 +90,7 @@ class Settings(BaseSettings):
 
     gcp_project: str = "demo-cinema"
     agent_email: str = "agent@example.invalid"
-    agent_display_name: str = "Agentic Cinema"
+    agent_display_name: str = "Greenlit"
 
     # -- databases ---------------------------------------------------------- #
 

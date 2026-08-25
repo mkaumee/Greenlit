@@ -247,7 +247,16 @@ say "APIs"
 # Split by whether the API refuses to activate without a billing account.
 # Firestore and Gmail do not care, which is what makes the whole email loop
 # reachable on an unbilled project.
-FREE_APIS=(firestore.googleapis.com gmail.googleapis.com)
+FREE_APIS=(
+  firestore.googleapis.com
+  gmail.googleapis.com
+  # The Firebase management and hosting APIs. Neither needs billing, and
+  # neither was here until the web panel needed them — Phase 3 got all the way
+  # to a ticking deployment without either, which is exactly the problem the
+  # Firebase step below exists to catch.
+  firebase.googleapis.com
+  firebasehosting.googleapis.com
+)
 BILLED_APIS=(
   secretmanager.googleapis.com
   run.googleapis.com
@@ -298,12 +307,69 @@ create_db "$ORDERS_DB" "$ORDERS_DB — purchase orders only"
 
 # ---------------------------------------------------------------------------
 
+say "Firebase"
+
+# A Google Cloud project and a Firebase project are not the same thing, and
+# this is the least obvious trap in the whole setup.
+#
+# Everything in Phase 3 works without Firebase ever having been added:
+# `make deploy-rules` goes through firebaserules.googleapis.com and the
+# Firestore admin API, both plain GCP APIs. So the project deploys, ticks,
+# negotiates and passes verify_deploy.sh — and the first thing to actually need
+# the Firebase resource is the web panel, days later, which fails with
+#
+#     404 Firebase project 678371873554 not found.
+#
+# about a project that plainly exists. Enabling firebase.googleapis.com above
+# does not fix that: the API being on and the resource existing are different
+# things.
+#
+# This is also the first step here that is not pure gcloud, so a missing CLI
+# must not produce a stack trace. When the command does run and fails, print
+# what Google actually said: the first version of this swallowed stderr and
+# guessed at the cause in prose, and the guess was wrong on the first real
+# project it met. A message from the server beats a paragraph from us.
+if ! command -v firebase >/dev/null; then
+  printf '  \033[33m!\033[0m firebase CLI not found — cannot add Firebase to the project.\n'
+  printf '    npm install -g firebase-tools && firebase login\n'
+  printf '    or add it by hand: https://console.firebase.google.com → Add project\n'
+  printf '    → pick the EXISTING %s rather than creating a new one.\n' "$PROJECT_ID"
+elif firebase projects:list 2>/dev/null \
+     | awk '{print $2}' | grep -qx "$PROJECT_ID"; then
+  # Whole field, not a substring: `grep -q "$PROJECT_ID"` would match this id
+  # inside some other project's, and report Firebase present when it is not.
+  skip "Firebase resources"
+else
+  if add_output=$(firebase projects:addfirebase "$PROJECT_ID" 2>&1); then
+    ok "Firebase resources added"
+  else
+    # firebase-tools puts the HTTP status and message only in its debug log and
+    # writes "See firebase-debug.log for more info" to stderr, so relaying
+    # stderr alone relays a pointer rather than a cause. Dig the real line out.
+    # It is the difference between "something went wrong" and "403".
+    detail=$(grep -o 'HTTP Error: .*' firebase-debug.log 2>/dev/null | tail -1)
+    printf '  \033[33m!\033[0m Could not add Firebase to %s. Google said:\n' "$PROJECT_ID"
+    if [[ -n "$detail" ]]; then
+      printf '\033[90m      %s\033[0m\n' "$detail"
+    fi
+    printf '\033[90m      %s\033[0m\n' "${add_output//$'\n'/$'\n      '}"
+    printf '\n    The console does the same job and handles cases the CLI cannot —\n'
+    printf '    accepting the Firebase terms of service among them, which must be\n'
+    printf '    done once per account and which no CLI can present:\n'
+    printf '      https://console.firebase.google.com → Add project\n'
+    printf '      → pick the EXISTING %s rather than creating a new one.\n' "$PROJECT_ID"
+    printf '\n    Everything else in this script has still been done.\n'
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+
 say "Agent service account"
 if gcloud iam service-accounts describe "$AGENT_EMAIL" >/dev/null 2>&1; then
   skip "$AGENT_EMAIL"
 else
   gcloud iam service-accounts create "$AGENT_SA" \
-    --display-name="Agentic Cinema orchestrator" \
+    --display-name="Greenlit orchestrator" \
     --description="Runs the tick loop. Deliberately cannot write purchase orders." \
     >/dev/null
   ok "$AGENT_EMAIL"
