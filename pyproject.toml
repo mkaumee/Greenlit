@@ -83,12 +83,12 @@ line-ending = "lf"
 [tool.basedpyright]
 typeCheckingMode = "recommended"
 pythonVersion = "3.14"
-include = ["contracts", "orchestrator", "supplier-sim", "scripts"]
+include = ["contracts", "orchestrator", "supplier-sim", "scripts", "main-agent"]
 exclude = ["**/node_modules", "**/.venv", "**/__pycache__"]
 # scripts/ holds standalone tools that CI runs without installing anything.
 # Putting it on the path lets tests import them with real types instead of
 # loading them by filename and casting.
-extraPaths = ["scripts", "orchestrator/tests"]
+extraPaths = ["scripts", "main-agent/src", "orchestrator/tests"]
 
 # Ruff already ignores ISC001, so implicit concatenation is a deliberate team
 # choice. Leaving this on would make the two tools disagree about the same code.

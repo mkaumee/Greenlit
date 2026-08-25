@@ -7,6 +7,9 @@ requires-python = ">=3.14"
 dependencies = [
     "cinema-contracts",
     "google-cloud-firestore>=2.19",
+    # 2.35.0 changes gRPC metadata ordering and breaks the Firestore
+    # Emulator's handling of the "(default)" database routing header.
+    "google-api-core>=2.26,<2.35",
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
     "google-cloud-secret-manager>=2.20",
