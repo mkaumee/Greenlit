@@ -4,6 +4,10 @@
 # tee's. /bin/sh is dash on Debian and has no `pipefail`, so ask for bash.
 SHELL := /bin/bash
 
+# Cloud resource names, shared by the deploy targets so they cannot drift.
+REGION ?= us-central1
+APPROVALS_SERVICE ?= cinema-approvals
+
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
 .PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
 .PHONY: web-dev web-build deploy-web seed
@@ -104,25 +108,46 @@ deploy: require-gcloud require-project ## Deploy both Cloud Run services and the
 verify-deploy: require-gcloud require-project ## Check a deployment — read-only, and the real definition of done
 	PROJECT_ID=$(PROJECT_ID) ./scripts/verify_deploy.sh
 
-# vite lives in web/node_modules, which a fresh clone does not have. Without
-# this the first build on a new machine fails with `sh: vite: command not
-# found` — which names neither the missing package nor which of the two npm
-# projects in this repo is missing it. A file target rather than a phony one,
-# so it runs exactly when the binary is absent and never otherwise.
-web/node_modules/.bin/vite:
+# Keyed on the lockfile, not on any binary.
+#
+# An earlier version depended on web/node_modules/.bin/vite, which fixed the
+# empty-clone case and nothing else: vite being present says nothing about
+# whether the *dependencies* are current. Adding Tailwind and the router left
+# that target satisfied, npm ci never re-ran, and the next deploy died on
+# `Cannot find package '@tailwindcss/vite'`.
+#
+# npm writes node_modules/.package-lock.json on every install, so it is an
+# honest timestamp for what is actually installed. Newer lockfile means
+# reinstall; unchanged lockfile is still a no-op.
+web/node_modules/.package-lock.json: web/package-lock.json web/package.json
 	cd web && npm ci
 
 # The panel reads Firestore from the browser, so it needs an emulator with
 # something in it. `make e2e` fills one with a project, four items and twelve
 # negotiations — run that first, then this, and the screen has content from the
 # first paint. Drop VITE_USE_EMULATOR to point at the real project instead.
-web-dev: web/node_modules/.bin/vite ## Serve the instrument panel against the local emulators
+web-dev: web/node_modules/.package-lock.json ## Serve the instrument panel against the local emulators
 	cd web && VITE_USE_EMULATOR=1 npm run dev
 
-web-build: web/node_modules/.bin/vite ## Build the panel into web/dist, which firebase.json serves
+web-build: web/node_modules/.package-lock.json ## Build the panel into web/dist, which firebase.json serves
 	cd web && npm run build
 
-deploy-web: require-firebase require-project web-build ## Build and publish to Firebase Hosting
+# The Approve button posts to the approvals service, and Vite inlines that URL
+# at build time — so the panel is built against one specific deployment rather
+# than discovering it at runtime. Nobody should have to type it: it is the same
+# lookup verify_deploy.sh does. Missing is a hard failure, because publishing a
+# panel whose one irreversible action is inert is worse than not publishing.
+deploy-web: require-firebase require-gcloud require-project web/node_modules/.package-lock.json ## Build and publish to Firebase Hosting
+	@url=$$(gcloud run services describe $(APPROVALS_SERVICE) \
+	          --region=$(REGION) --project=$(PROJECT_ID) \
+	          --format='value(status.url)' 2>/dev/null); \
+	  if [ -z "$$url" ]; then \
+	    echo "could not find the $(APPROVALS_SERVICE) service in $(PROJECT_ID)."; \
+	    echo "  deploy it first:  make deploy PROJECT_ID=$(PROJECT_ID)"; \
+	    exit 2; \
+	  fi; \
+	  echo "  approvals: $$url"; \
+	  cd web && VITE_APPROVALS_URL="$$url" npm run build
 	firebase deploy --only hosting --project $(PROJECT_ID)
 
 # Puts a screenplay into a DEPLOYED project, so the hosted panel has something

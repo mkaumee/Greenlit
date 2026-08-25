@@ -195,6 +195,25 @@ that research invented, from a screenplay, with nobody expecting it.
 `--allow-live-mail` overrides that, and should be used only when a real
 round-trip is the point.
 
+### 5b. The panel is built against one approvals service
+
+`make deploy-web` looks up the `cinema-approvals` URL and inlines it into the
+bundle, because Vite substitutes `import.meta.env` at build time rather than
+reading it in the browser. Two consequences worth knowing:
+
+- **Deploy the services before the panel.** `make deploy-web` fails rather than
+  publishing if it cannot find the service — a panel whose only irreversible
+  action is inert is worse than no panel.
+- **Re-deploy the panel if the approvals URL ever changes.** It will not pick
+  up a new one on its own.
+
+Approving also needs the signed-in account to carry the `producer` claim, or
+every attempt is a 403 by design:
+
+```bash
+uv run python scripts/grant_producer.py you@example.com
+```
+
 ### 6. Turn real email on, once the token exists
 
 Only after `docs/oauth-runbook.md` is done and the token is in Secret Manager:
