@@ -92,7 +92,15 @@ poor choice for it.
      They are optional in Testing, and filling them in is the first step down
      the publishing path that does not lead anywhere.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**
-   - Application type: **Desktop app**.
+   - Application type: **Desktop app**. Not "Web application" — that is the
+     single most common mistake here, and it fails late with
+     `Error 400: redirect_uri_mismatch`, which reads like a console setting to
+     change rather than a client to recreate. A Desktop client permits
+     `http://localhost` on any port, which this flow needs; a Web client only
+     permits redirect URIs you register in advance, and the port is chosen
+     fresh on every run. The bootstrap now refuses a Web client up front.
+   - Check what you downloaded: the JSON's top-level key is `installed` for a
+     Desktop client and `web` for the wrong one.
    - Download the JSON and save it as `.secrets/client_secret.json`.
      That directory is gitignored; keep it that way.
 
