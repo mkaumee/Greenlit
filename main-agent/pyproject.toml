@@ -68,5 +68,3 @@ line-ending = "lf"
 [tool.basedpyright]
 typeCheckingMode = "recommended"
 pythonVersion = "3.14"
-venvPath = ".."
-venv = ".venv"
