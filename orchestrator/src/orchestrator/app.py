@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from cinema_contracts import AgentBrain, Money, ScriptSource
+from cinema_contracts import AgentBrain, BreakdownSource, Money
 from cinema_contracts.testing import ScriptedBrain
 from fastapi import FastAPI, HTTPException, Request
 from google.api_core.exceptions import AlreadyExists
@@ -347,8 +347,8 @@ async def upload_script(
         raise HTTPException(status_code=404, detail=f"no project {project_id}")
 
     now = await services.clock.now(project_id)
-    drafts = await services.brain.extract_props(
-        ScriptSource(
+    drafts = await services.brain.parse_breakdown(
+        BreakdownSource(
             filename=body.filename,
             mime_type=body.mime_type,
             text_content=body.text_content,
