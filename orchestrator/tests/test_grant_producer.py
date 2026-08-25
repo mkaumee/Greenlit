@@ -159,3 +159,27 @@ async def test_a_granted_producer_can_actually_approve(
     assert refused.status_code == 403, "no claim yet"
     assert stale.status_code == 403, "the old token never carried the claim"
     assert allowed.status_code == 200, allowed.text
+
+
+def test_it_refuses_to_grant_on_the_demo_project(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Granting a claim on the wrong project is a silent no-op with real cost.
+
+    ``gcp_project`` defaults to the emulator's ``demo-cinema``, so running this
+    against a live deployment without naming it sent firebase-admin to ask
+    Google about a project that does not exist. That surfaced as
+    PROJECT_NOT_FOUND under a stack trace which never mentioned which project
+    it had used — and the producer it was meant to grant still could not
+    approve anything.
+
+    Emulator env is cleared here so the check sees the same conditions a person
+    running it against production does.
+    """
+    monkeypatch.delenv("FIREBASE_AUTH_EMULATOR_HOST", raising=False)
+
+    assert main(["someone@example.invalid"]) == 2
+
+    said = capsys.readouterr().out
+    assert "demo-cinema" in said, "it must name the project it was about to use"
+    assert "--project" in said, "and how to fix it"

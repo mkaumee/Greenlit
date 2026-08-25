@@ -9,6 +9,8 @@ validation and response models.
 """
 
 import logging
+import sys
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -300,3 +302,47 @@ async def test_a_tick_with_no_projects_still_logs(
     ticks = [r for r in caplog.records if r.getMessage() == "tick"]
     assert len(ticks) == 1, "an empty tick must still produce a line"
     assert getattr(ticks[0], "projects", None) == 0
+
+
+def test_the_real_brain_is_built_with_the_configured_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring to Role A's brain, provable before role_a is merged.
+
+    ``GeminiAgentBrain`` takes ``model`` as a required keyword deliberately —
+    Role A's docstring says the application wiring chooses the deployed model
+    rather than the brain reading ambient configuration. That contract is easy
+    to get wrong in a way nothing catches: pass no model and it is a TypeError
+    at startup; pass the wrong attribute name and it is an AttributeError days
+    later. A fake module standing in for the package pins both.
+    """
+    seen: dict[str, object] = {}
+
+    class FakeBrain:
+        def __init__(self, *, model: str) -> None:
+            seen["model"] = model
+
+        # Underscored: the protocol needs the methods to exist with the right
+        # names, not to do anything. isinstance() against a runtime_checkable
+        # Protocol checks presence only.
+        async def parse_breakdown(self, _source: object) -> list[object]:
+            return []
+
+        async def research_item(self, _brief: object) -> object: ...
+        async def extract_quote(self, _message: object) -> object: ...
+        async def next_move(self, _ctx: object) -> object: ...
+
+    module = types.ModuleType("main_agent")
+    module.GeminiAgentBrain = FakeBrain  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setitem(sys.modules, "main_agent", module)
+
+    brain = build_brain(
+        Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            brain_backend=BrainBackend.MAIN_AGENT,
+            gemini_model="gemini-3.7-pro",
+        )
+    )
+
+    assert isinstance(brain, FakeBrain)
+    assert seen["model"] == "gemini-3.7-pro", "the configured model must reach it"

@@ -1,9 +1,10 @@
 # uv workspace root. Not a package itself.
 #
-# `main-agent` (Role A) joins this members list when role_a and role_b merge.
-# It is absent here only because it does not exist on this branch yet.
+# `main-agent` is Role A's package. It is listed here so the workspace resolves
+# it the moment role_a lands; until then the directory is absent and uv simply
+# has nothing to build for it, while CINEMA_BRAIN_BACKEND stays on the fake.
 [tool.uv.workspace]
-members = ["contracts", "orchestrator", "supplier-sim"]
+members = ["contracts", "orchestrator", "supplier-sim", "main-agent"]
 
 [tool.uv.sources]
 cinema-contracts = { workspace = true }

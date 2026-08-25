@@ -559,10 +559,34 @@ building.
 
 ## Open questions
 
-- **Role A sign-off on `contracts/`.** The four signatures and the five shapes
-  are written and tested, but BlueGecko has not agreed to them. Every day he
-  builds against something else is a day of rework. This is the highest-value
-  conversation available right now.
+- ~~**Role A sign-off on `contracts/`.**~~ Resolved, and it had already
+  diverged: `GeminiAgentBrain` was built against `BreakdownSource`,
+  `ItemDraft` and `parse_breakdown` while the contract said `ScriptSource`,
+  `PropDraft` and `extract_props`. The other three signatures matched. The
+  contract moved to his names — he had already built to them, and *breakdown*
+  is the real film term. **BlueGecko should be told the contract moved toward
+  him**, and he still owns two things Role B cannot decide: which Gemini model
+  to default to, and whether `parallel-web` needs a key in the deployed
+  environment.
+
+### Merging `main-agent` — the two steps that need the directory to exist
+
+Everything else is done: the rename, `settings.gemini_model`, `build_brain`
+constructing `GeminiAgentBrain(model=…)` (covered by a test using a fake
+module), `main-agent` listed as a workspace member, and `deploy.sh` passing
+`CINEMA_BRAIN_BACKEND`. These two cannot land before the branches merge,
+because both fail while `main-agent/` is absent:
+
+1. **`orchestrator/pyproject.toml`** — declare `main-agent` as an optional
+   dependency, or the image will not install it and selecting the real brain
+   fails at startup. Adding it now breaks `uv sync` on this branch.
+2. **`Dockerfile`** — `COPY main-agent/pyproject.toml main-agent/` in the
+   dependency layer and `COPY main-agent/ main-agent/` in the source layer,
+   mirroring `contracts`. Adding it now breaks `make image`, which CI runs.
+
+Then: `BRAIN_BACKEND=main-agent ./scripts/deploy.sh`, **with mail still off**.
+Read the emails it writes before turning the transport on — a real brain
+producing plausible-but-wrong text is the failure the fake cannot show.
 - ~~Who publishes the OAuth consent screen.~~ Answered, and the answer is
   nobody: `gmail.modify` is a restricted scope, so publishing forces Google's
   verification plus a CASA security assessment. The app stays in Testing and we

@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from cinema_contracts import AgentBrain, Money, ScriptSource
+from cinema_contracts import AgentBrain, BreakdownSource, Money
 from cinema_contracts.testing import ScriptedBrain
 from fastapi import FastAPI, HTTPException, Request
 from google.api_core.exceptions import AlreadyExists
@@ -110,13 +110,17 @@ def build_brain(settings: Settings) -> AgentBrain:
                 "branch; add it to the uv workspace members after merging."
             ) from exc
 
-        brain: object = module.Brain()
+        brain: object = module.GeminiAgentBrain(model=settings.gemini_model)
         if not isinstance(brain, AgentBrain):
             raise RuntimeError(
-                "main_agent.Brain does not satisfy the AgentBrain protocol. "
-                "Checked at startup rather than on the first tick, because a "
-                "missing method would otherwise surface days into a negotiation."
+                "main_agent.GeminiAgentBrain does not satisfy the AgentBrain "
+                "protocol. Checked at startup rather than on the first tick, "
+                "because a missing method would otherwise surface days into a "
+                "negotiation."
             )
+        log.info(
+            "brain", extra={"backend": "main-agent", "model": settings.gemini_model}
+        )
         return brain
 
     log.warning(
@@ -347,8 +351,8 @@ async def upload_script(
         raise HTTPException(status_code=404, detail=f"no project {project_id}")
 
     now = await services.clock.now(project_id)
-    drafts = await services.brain.extract_props(
-        ScriptSource(
+    drafts = await services.brain.parse_breakdown(
+        BreakdownSource(
             filename=body.filename,
             mime_type=body.mime_type,
             text_content=body.text_content,

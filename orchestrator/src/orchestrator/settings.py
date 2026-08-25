@@ -121,6 +121,15 @@ class Settings(BaseSettings):
     email. ``/health`` reports which one is live for that reason.
     """
 
+    gemini_model: str = "gemini-3.7-flash"
+    """Which Gemini model Role A's brain reasons with.
+
+    Configuration rather than a literal, and passed explicitly rather than read
+    from the environment inside main-agent — GeminiAgentBrain requires it as a
+    keyword for exactly that reason, so a test can substitute a model without
+    touching domain code. Only read when brain_backend is main-agent.
+    """
+
     mail_backend: MailBackend = MailBackend.MEMORY
     """Defaults to memory on purpose.
 
@@ -145,6 +154,23 @@ class Settings(BaseSettings):
     """Secret Manager secret name, used only when token_backend is secret-manager."""
 
     # -- approvals ---------------------------------------------------------- #
+
+    allowed_origins: str = ""
+    """Comma-separated browser origins the approval service will answer.
+
+    Empty by default, which means no cross-origin call succeeds — the same
+    posture as ``mail_backend`` defaulting to ``memory``. A service that
+    approves purchases should not accept a request from any page that happens
+    to know its URL, and a permissive default is exactly the kind of thing that
+    survives to production because nothing visibly breaks.
+
+    The tick service has no CORS at all: Cloud Run IAM refuses anonymous
+    callers before FastAPI sees them, and no browser is meant to reach it.
+    """
+
+    @property
+    def origin_list(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     auth_emulator_host: str = ""
     """Mirrors FIREBASE_AUTH_EMULATOR_HOST, for reporting on /health.

@@ -43,6 +43,7 @@ from typing import Annotated
 
 from cinema_contracts import Money, NegotiationState
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from google.cloud.firestore_v1 import AsyncClient
 from pydantic import BaseModel
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     services = build_approval_services(settings)
     init_firebase(services.settings)
     app.state.services = services
+    ALLOWED_ORIGINS[:] = services.settings.origin_list
     log.info(
         "approvals up",
         extra={
@@ -117,6 +119,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 app = FastAPI(title="Greenlit approvals", lifespan=lifespan)
+
+# The panel runs on Firebase Hosting and this service on Cloud Run — different
+# origins, so every approval is a cross-origin POST and the browser sends a
+# preflight first. Without this the Approve button fails before the request
+# ever reaches a route, and the console error says nothing about approvals.
+#
+# Origins come from configuration and default to none. Wildcards are refused by
+# the browser anyway once credentials are involved, and "allow any origin" on
+# the one service that can spend money is not a default worth having.
+#
+# The origin list is a mutable list filled in by ``lifespan`` rather than read
+# here. Middleware has to be attached at construction, but settings.py is
+# explicit that configuration is built once at startup and passed down, never
+# read at point of use — and a module that calls ``Settings()`` at import is a
+# module you cannot test without setting environment variables. Starlette holds
+# this list by reference and membership-tests it per request, so filling it in
+# later is enough, and tests can set it directly.
+ALLOWED_ORIGINS: list[str] = []
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.exception_handler(IllegalTransitionError)

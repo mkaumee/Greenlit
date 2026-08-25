@@ -1,227 +1,180 @@
 /**
- * The instrument panel.
+ * The shell: sign in, pick a project, and route.
  *
- * Read-only and undesigned on purpose. Its job is to make the loop visible —
- * the system has been ticking every minute in production with no way to watch
- * a negotiation move except the Firestore console. Phase 6 turns this into the
- * Timeline; until then it is the debugging surface for everything already
- * built.
+ * The Inbox is the home screen rather than the item list, deliberately. The
+ * agent does the reading, the researching and the days of negotiating on its
+ * own; the only thing it cannot do is spend money. Making the decision queue
+ * the front door puts the stop condition at the centre of the product instead
+ * of leaving it as a status label on a table row.
  */
 
 import { useEffect, useState } from "react";
+import { NavLink, Route, HashRouter as Router, Routes } from "react-router-dom";
 
-import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "./firebase";
-import type { User } from "./firebase";
-import { explain } from "./authErrors";
-import { useNegotiations, useProjects } from "./useNegotiations";
-import type { Money, Negotiation } from "./useNegotiations";
+import { explain } from "@/authErrors";
+import { Button } from "@/components/ui/button";
+import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
+import type { User } from "@/firebase";
+import { useItems, useNegotiations, useProjects, useSuppliers } from "@/hooks/useProject";
+import { Breakdown } from "@/screens/Breakdown";
+import { DebugPanel } from "@/screens/DebugPanel";
+import { Inbox } from "@/screens/Inbox";
+import { Savings } from "@/screens/Savings";
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
 
-  useEffect(() => {
+  useEffect(
     // Fires once with the restored session before any interaction, which is
-    // why "signed out" must not be rendered until it has.
-    return auth.onAuthStateChanged((next) => {
-      setUser(next);
-      setReady(true);
-    });
-  }, []);
-
-  const attempt = (action: () => Promise<void>) => () => {
-    setError("");
-    void action().catch((cause: unknown) => {
-      setError(explain(cause));
-    });
-  };
+    // why "signed out" must not render until it has.
+    () =>
+      auth.onAuthStateChanged((next) => {
+        setUser(next);
+        setReady(true);
+      }),
+    [],
+  );
 
   if (!ready) {
-    return <main style={S.page}>Checking sign-in…</main>;
+    return <Centred>Checking sign-in…</Centred>;
+  }
+
+  if (user === null) {
+    return (
+      <Centred>
+        <h1 className="text-2xl font-semibold">Greenlit</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          An agent reads your screenplay, finds every prop it needs, and
+          negotiates with sellers over days. It never buys anything — you do.
+        </p>
+        <Button
+          onClick={() => {
+            setError("");
+            void signIn().catch((cause: unknown) => setError(explain(cause)));
+          }}
+        >
+          Sign in with Google
+        </Button>
+        {error !== "" && <p className="max-w-md text-sm text-destructive">{error}</p>}
+      </Centred>
+    );
   }
 
   return (
-    <main style={S.page}>
-      <header style={S.header}>
-        <h1 style={S.title}>
-          Greenlit {USE_EMULATOR && <span style={S.badge}>emulator</span>}
-        </h1>
-        {user === null ? (
-          <button style={S.button} onClick={attempt(signIn)} type="button">
-            Sign in with Google
-          </button>
-        ) : (
-          <span style={S.who}>
-            {user.email ?? user.uid}
-            <button
-              style={S.button}
-              onClick={attempt(signOutOfEverything)}
-              type="button"
+    <Router>
+      <SignedIn user={user} />
+    </Router>
+  );
+}
+
+function SignedIn({ user }: { user: User }) {
+  const { ids } = useProjects();
+  const [chosen, setChosen] = useState("");
+  const projectId = chosen !== "" && ids.includes(chosen) ? chosen : (ids[0] ?? "");
+
+  const { rows: items } = useItems(projectId);
+  const { rows: negotiations } = useNegotiations(projectId);
+  const { rows: suppliers } = useSuppliers(projectId);
+
+  const supplierName = (id: string | undefined): string =>
+    suppliers.find((s) => s.id === id)?.name ?? id ?? "unknown seller";
+
+  const waiting = new Set(
+    negotiations.filter((n) => n.state === "READY_FOR_HUMAN").map((n) => n.item_id),
+  ).size;
+
+  return (
+    <div className="mx-auto max-w-5xl px-6 py-8">
+      <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-semibold">Greenlit</h1>
+          {USE_EMULATOR && (
+            <span className="rounded-sm bg-muted px-2 py-0.5 text-xs">emulator</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-sm">
+          {ids.length > 1 && (
+            <select
+              className="rounded-md border bg-background px-2 py-1"
+              onChange={(e) => setChosen(e.target.value)}
+              value={projectId}
             >
-              Sign out
-            </button>
-          </span>
-        )}
+              {ids.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="text-muted-foreground">{user.email ?? user.uid}</span>
+          <Button variant="outline" size="sm" onClick={() => void signOutOfEverything()}>
+            Sign out
+          </Button>
+        </div>
       </header>
 
-      {error !== "" && <p style={S.error}>{error}</p>}
+      <nav className="mb-8 flex gap-1 border-b">
+        <Tab to="/" label="Needs you" count={waiting} />
+        <Tab to="/breakdown" label="Breakdown" />
+        <Tab to="/savings" label="Savings" />
+        <Tab to="/debug" label="Debug" />
+      </nav>
 
-      {user === null ? (
-        <p>
-          Every read is gated behind <code>isSignedIn()</code> in{" "}
-          <code>firestore.rules</code>. There is no anonymous view.
-        </p>
-      ) : (
-        <Panel />
-      )}
-    </main>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <Inbox
+              projectId={projectId}
+              items={items}
+              negotiations={negotiations}
+              supplierName={supplierName}
+            />
+          }
+        />
+        <Route
+          path="/breakdown"
+          element={<Breakdown items={items} negotiations={negotiations} />}
+        />
+        <Route
+          path="/savings"
+          element={<Savings items={items} negotiations={negotiations} />}
+        />
+        <Route path="/debug" element={<DebugPanel />} />
+      </Routes>
+    </div>
   );
 }
 
-function Panel() {
-  const { ids, error: projectError } = useProjects();
-  const [chosen, setChosen] = useState<string>("");
-
-  // Whichever project exists, until someone picks another. An empty list is
-  // the correct state for a deployment with no screenplay uploaded yet, not a
-  // bug — so it says which of the two it is.
-  const project = chosen !== "" && ids.includes(chosen) ? chosen : (ids[0] ?? "");
-  const { rows, error, loading } = useNegotiations(project);
-
-  if (projectError !== "") {
-    return <p style={S.error}>{projectError}</p>;
-  }
-
-  if (ids.length === 0) {
-    return <p>No projects. Upload a screenplay and this fills in.</p>;
-  }
-
+function Tab({ to, label, count }: { to: string; label: string; count?: number }) {
   return (
-    <>
-      <p>
-        <label>
-          Project{" "}
-          <select
-            onChange={(event) => setChosen(event.target.value)}
-            style={S.button}
-            value={project}
-          >
-            {ids.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-        </label>{" "}
-        <span style={S.note}>
-          {rows.length} negotiation{rows.length === 1 ? "" : "s"} · times are
-          simulated, from the project clock
+    <NavLink
+      to={to}
+      end
+      className={({ isActive }) =>
+        `-mb-px border-b-2 px-4 py-2 text-sm ${
+          isActive
+            ? "border-foreground font-medium"
+            : "border-transparent text-muted-foreground hover:text-foreground"
+        }`
+      }
+    >
+      {label}
+      {count !== undefined && count > 0 && (
+        <span className="ml-2 rounded-full bg-foreground px-1.5 py-0.5 text-xs text-background">
+          {count}
         </span>
-      </p>
-
-      {error !== "" && <p style={S.error}>{error}</p>}
-      {loading && <p>Subscribing…</p>}
-
-      <table style={S.table}>
-        <thead>
-          <tr>
-            {[
-              "Item",
-              "Supplier",
-              "State",
-              "Latest quote",
-              "Rounds",
-              "Msgs",
-              "Next due (sim)",
-              "Last heard (sim)",
-              "Escalation",
-            ].map((head) => (
-              <th key={head} style={S.th}>
-                {head}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <Row key={row.id} row={row} />
-          ))}
-        </tbody>
-      </table>
-    </>
+      )}
+    </NavLink>
   );
 }
 
-function Row({ row }: { row: Negotiation }) {
+function Centred({ children }: { children: React.ReactNode }) {
   return (
-    <tr>
-      <td style={S.td}>{row.item_id ?? "—"}</td>
-      <td style={S.td}>{row.supplier_id ?? "—"}</td>
-      <td style={S.td}>{row.state ?? "—"}</td>
-      <td style={S.td}>{money(row.latest_quote?.unit_price)}</td>
-      <td style={S.td}>
-        {row.rounds_used ?? 0}/{row.max_rounds ?? "?"}
-      </td>
-      <td style={S.td}>{row.messages ?? "…"}</td>
-      <td style={S.td}>{simTime(row.next_action_due_at)}</td>
-      <td style={S.td}>{simTime(row.last_inbound_at)}</td>
-      <td style={S.td}>{row.escalation_reason ?? ""}</td>
-    </tr>
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+      {children}
+    </div>
   );
 }
-
-/**
- * Never a formatted string from the database — money is stored as an amount
- * and a currency, and the formatting happens here so a mixed-currency total
- * cannot be faked by string concatenation somewhere upstream.
- */
-const money = (value: Money | undefined): string =>
-  value === undefined ? "—" : `${value.currency} ${value.amount}`;
-
-/**
- * Simulated time, and labelled as such in the column head.
- *
- * Rendered in UTC rather than the browser's zone deliberately: every timestamp
- * written to Firestore comes from `clock.now()`, and quietly shifting it into
- * local time would make a five-day negotiation look like it happened at hours
- * nobody worked.
- */
-const simTime = (value: { toDate: () => Date } | undefined): string => {
-  if (value === undefined) {
-    return "—";
-  }
-  return value.toDate().toISOString().slice(0, 16).replace("T", " ");
-};
-
-const S = {
-  page: {
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    fontSize: 13,
-    padding: "1.5rem",
-  },
-  header: {
-    alignItems: "baseline",
-    display: "flex",
-    gap: "1rem",
-    justifyContent: "space-between",
-  },
-  title: { fontSize: 16, fontWeight: 600, margin: 0 },
-  who: { alignItems: "center", display: "flex", gap: "0.75rem" },
-  badge: { color: "#a60", fontWeight: 400 },
-  note: { color: "#666" },
-  error: { color: "#c00", margin: "0.5rem 0" },
-  table: { borderCollapse: "collapse", width: "100%" } as const,
-  th: {
-    borderBottom: "1px solid #999",
-    padding: "0.35rem 0.6rem",
-    textAlign: "left",
-    whiteSpace: "nowrap",
-  } as const,
-  td: {
-    borderBottom: "1px solid #eee",
-    padding: "0.35rem 0.6rem",
-    whiteSpace: "nowrap",
-  } as const,
-  button: { cursor: "pointer", font: "inherit", padding: "0.25rem 0.75rem" },
-} as const;
