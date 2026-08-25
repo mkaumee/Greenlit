@@ -549,7 +549,7 @@ wheels = [
 
 [[package]]
 name = "google-api-core"
-version = "2.35.0"
+version = "2.34.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-auth" },
@@ -558,8 +558,9 @@ dependencies = [
     { name = "protobuf" },
     { name = "requests" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/7b/7c/9be3903e3d45415e8ca493c75f8990a0f6f579d168015d44c379350d0ab0/google_api_core-2.34.0.tar.gz", hash = "sha256:98a779fe72de956eb1c9c2f47ff4c4432a668ece1a002ec38bed07ec2698ae59", size = 187953, upload-time = "2026-08-06T06:23:58.128Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/a9/fcaef7316fc169ee07aafeed82d3788cee539f0d31d1c4e30cf085dc6bbe/google_api_core-2.35.0-py3-none-any.whl", hash = "sha256:88ce7a11146e1ddd331f7d2fd379787eb7e9015c34c6ed681e4f5fb8af3615af", size = 181423, upload-time = "2026-08-24T21:55:02.781Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/c1/a8a92ae1bc4b1a8f804c776d7d3f0c771b78a62c3ad4df1be41b3fd8c767/google_api_core-2.34.0-py3-none-any.whl", hash = "sha256:cdf9c67e7ca2402d86ccbfde5f2503fc83e3cc3f58cc78456ae96cad24a6d2de", size = 180545, upload-time = "2026-08-06T06:22:47.502Z" },
 ]
 
 [package.optional-dependencies]
@@ -1151,6 +1152,7 @@ dependencies = [
     { name = "cinema-contracts" },
     { name = "fastapi" },
     { name = "firebase-admin" },
+    { name = "google-api-core" },
     { name = "google-api-python-client" },
     { name = "google-auth-oauthlib" },
     { name = "google-cloud-firestore" },
@@ -1164,6 +1166,7 @@ requires-dist = [
     { name = "cinema-contracts", editable = "contracts" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "firebase-admin", specifier = ">=7.0" },
+    { name = "google-api-core", specifier = ">=2.26,<2.35" },
     { name = "google-api-python-client", specifier = ">=2.150" },
     { name = "google-auth-oauthlib", specifier = ">=1.2" },
     { name = "google-cloud-firestore", specifier = ">=2.19" },
