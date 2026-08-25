@@ -119,6 +119,34 @@ Run it on the laptop with `CINEMA_TOKEN_BACKEND=secret-manager` and the token
 lands straight in Secret Manager, where Cloud Run reads it. The laptop needs
 `gcloud auth application-default login` first.
 
+## Doing it entirely from Cloud Shell
+
+The default flow needs a browser on the same machine, which Cloud Shell does
+not have. There is a second path that works there, and it uses a **Web
+application** OAuth client rather than a Desktop one:
+
+1. **Web Preview → "Preview on port 8080"** in Cloud Shell. Copy the URL —
+   `https://8080-cs-….cloudshell.dev/`.
+2. Register that exact URL, trailing slash included, under **Authorised
+   redirect URIs** on a Web-application OAuth client.
+3. ```bash
+   CINEMA_TOKEN_BACKEND=secret-manager \
+   CINEMA_GCP_PROJECT=your-project-id \
+     uv run python scripts/oauth_bootstrap.py \
+       --redirect-uri 'https://8080-cs-….cloudshell.dev/'
+   ```
+4. Open the link it prints, consent **as the agent's mailbox**, and copy the
+   `code=` value out of the address bar. The page itself will probably fail to
+   load; that does not matter — nothing needs to be listening there.
+
+This is the old out-of-band flow rebuilt on a registered redirect, because
+Google withdrew `urn:ietf:wg:oauth:2.0:oob` in 2023. The authorisation code is
+in the query string whether or not anything answers the request, so a person
+reading the address bar can carry it across.
+
+Codes are single-use and expire within minutes. If you take too long, run it
+again.
+
 ## Minting a token
 
 ```bash
