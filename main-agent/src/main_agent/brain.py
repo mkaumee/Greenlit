@@ -11,14 +11,14 @@ from typing import final, override
 
 from cinema_contracts import (
     AgentBrain,
-    BreakdownSource,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
+    ScriptSource,
 )
 
 from main_agent.breakdown import BreakdownParser
@@ -48,8 +48,8 @@ class GeminiAgentBrain(AgentBrain):
         self._negotiation_decider = NegotiationDecider(model=model)
 
     @override
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
-        """Extract purchasable drafts from an uploaded shooting breakdown."""
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
+        """Extract auditable prop drafts from an uploaded screenplay."""
         return await self._breakdown_parser.parse(source)
 
     @override

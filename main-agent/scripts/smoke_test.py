@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from cinema_contracts import (
-    BreakdownSource,
     InboundMessage,
     ItemBrief,
     MessageDirection,
@@ -12,6 +11,7 @@ from cinema_contracts import (
     Money,
     NegotiationContext,
     NegotiationState,
+    ScriptSource,
     SupplierCandidate,
 )
 from pydantic import BaseModel
@@ -39,24 +39,20 @@ async def main() -> None:
 
     print(f"Using model: {model}")
 
-    breakdown = BreakdownSource(
-        filename="smoke-test-breakdown.txt",
+    screenplay = ScriptSource(
+        filename="smoke-test-screenplay.txt",
         mime_type="text/plain",
         text_content="""
 Scene 12 - Hotel ballroom, night
 
-Required equipment:
-- 2 x Aputure 600D lights
-- 1 x haze machine
-- 4 x wireless lavalier microphones
-
-Props:
-- 1 x vintage leather suitcase
+MARA enters carrying a vintage leather suitcase. She sets it beside the table,
+opens it, and removes a sealed paper envelope. During the struggle, the suitcase
+is thrown into the full-length mirror, shattering the mirror.
 """.strip(),
     )
 
-    drafts = await brain.parse_breakdown(breakdown)
-    print_result("parse_breakdown", drafts)
+    drafts = await brain.extract_props(screenplay)
+    print_result("extract_props", drafts)
 
     item = ItemBrief(
         item_id="smoke-test-aputure-600d",

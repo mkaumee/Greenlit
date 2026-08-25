@@ -1,4 +1,4 @@
-"""Shooting-breakdown parsing capability."""
+"""Screenplay prop-extraction capability."""
 
 from main_agent.breakdown.parser import BreakdownParser
 
