@@ -10,7 +10,7 @@ APPROVALS_SERVICE ?= cinema-approvals
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
 .PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
-.PHONY: web-dev web-build deploy-web seed
+.PHONY: web-dev web-build deploy-web seed gmail-smoke
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -154,6 +154,19 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 # on it. Goes through the deployed service's own HTTP API rather than writing
 # to Firestore, so a successful seed is also evidence the deployment works.
 # It refuses to run against a deployment that sends real email.
+# The one thing in this repo that hands a message to Google. Deliberately not
+# part of any automated target: it sends real email to a real inbox.
+#
+#   make gmail-smoke TO=seller@example.com   # send one
+#   make gmail-smoke POLL=1                  # read the reply
+gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
+	@if [ -n "$(POLL)" ]; then \
+	  uv run python scripts/gmail_smoke.py --poll; \
+	else \
+	  [ -n "$(TO)" ] || { echo "make gmail-smoke TO=seller@example.com"; exit 2; }; \
+	  uv run python scripts/gmail_smoke.py --to "$(TO)"; \
+	fi
+
 seed: require-gcloud require-project ## Seed a deployed project with a screenplay
 	uv run python scripts/seed_project.py --project-id $(PROJECT_ID) $(ARGS)
 

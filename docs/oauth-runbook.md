@@ -46,6 +46,27 @@ What makes this survivable is noticing quickly. An expired token surfaces as
 `invalid_grant`, which the tick reports as an error rather than a crash — so
 check `/health` and the tick logs, not just whether the service is up.
 
+## Prove it before the loop uses it
+
+Once the token exists, send one email by hand before turning `MAIL_BACKEND=gmail`
+on the deployed tick:
+
+```bash
+make gmail-smoke TO=your-second-account@gmail.com   # send one
+# reply from that mailbox, then
+make gmail-smoke POLL=1                             # read it back
+```
+
+The transport has always been green against a fake. This is the first thing
+that hands a message to Google, and doing it in isolation means a wrong scope
+or a broken header costs you one email you sent deliberately, rather than four
+the deployed loop sent to suppliers while you were not watching.
+
+**What counts as passing is the threading**, not the arrival. `poll` reports
+whether the reply carries the same Gmail `thread_id` as the message we sent. A
+reply that lands in its own thread cannot be filed against a negotiation, and
+from the panel that is indistinguishable from a supplier who never answered.
+
 ## The mailboxes
 
 Two Google accounts, neither of them your personal one:
@@ -71,9 +92,60 @@ poor choice for it.
      They are optional in Testing, and filling them in is the first step down
      the publishing path that does not lead anywhere.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**
-   - Application type: **Desktop app**.
+   - Application type: **Desktop app**. Not "Web application" — that is the
+     single most common mistake here, and it fails late with
+     `Error 400: redirect_uri_mismatch`, which reads like a console setting to
+     change rather than a client to recreate. A Desktop client permits
+     `http://localhost` on any port, which this flow needs; a Web client only
+     permits redirect URIs you register in advance, and the port is chosen
+     fresh on every run. The bootstrap now refuses a Web client up front.
+   - Check what you downloaded: the JSON's top-level key is `installed` for a
+     Desktop client and `web` for the wrong one.
    - Download the JSON and save it as `.secrets/client_secret.json`.
      That directory is gitignored; keep it that way.
+
+## Where the bootstrap has to run
+
+**On a machine with a browser — your laptop, not Cloud Shell.**
+
+`scripts/oauth_bootstrap.py` uses `flow.run_local_server(port=0)`, which starts
+a local web server and waits for a browser on the *same machine* to complete
+consent. Cloud Shell has no browser on the VM, so this cannot work there.
+
+There is no way around it: Google shut off the console/out-of-band flow in
+2023, so `run_console()` no longer exists as an option for new clients.
+
+Run it on the laptop with `CINEMA_TOKEN_BACKEND=secret-manager` and the token
+lands straight in Secret Manager, where Cloud Run reads it. The laptop needs
+`gcloud auth application-default login` first.
+
+## Doing it entirely from Cloud Shell
+
+The default flow needs a browser on the same machine, which Cloud Shell does
+not have. There is a second path that works there, and it uses a **Web
+application** OAuth client rather than a Desktop one:
+
+1. **Web Preview → "Preview on port 8080"** in Cloud Shell. Copy the URL —
+   `https://8080-cs-….cloudshell.dev/`.
+2. Register that exact URL, trailing slash included, under **Authorised
+   redirect URIs** on a Web-application OAuth client.
+3. ```bash
+   CINEMA_TOKEN_BACKEND=secret-manager \
+   CINEMA_GCP_PROJECT=your-project-id \
+     uv run python scripts/oauth_bootstrap.py \
+       --redirect-uri 'https://8080-cs-….cloudshell.dev/'
+   ```
+4. Open the link it prints, consent **as the agent's mailbox**, and copy the
+   `code=` value out of the address bar. The page itself will probably fail to
+   load; that does not matter — nothing needs to be listening there.
+
+This is the old out-of-band flow rebuilt on a registered redirect, because
+Google withdrew `urn:ietf:wg:oauth:2.0:oob` in 2023. The authorisation code is
+in the query string whether or not anything answers the request, so a person
+reading the address bar can carry it across.
+
+Codes are single-use and expire within minutes. If you take too long, run it
+again.
 
 ## Minting a token
 
