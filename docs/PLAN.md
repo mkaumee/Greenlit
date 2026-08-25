@@ -475,7 +475,7 @@ deployed project, through the service's own endpoints. It refuses to run when
   SDK if pointed at production:
 
   ```bash
-  firebase apps:create web "Agentic Cinema" --project $PROJECT_ID
+  firebase apps:create web "Greenlit" --project $PROJECT_ID
   firebase apps:sdkconfig web --project $PROJECT_ID
   ```
 

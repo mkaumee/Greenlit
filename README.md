@@ -1,4 +1,4 @@
-# Agentic Cinema
+# Greenlit
 
 An agentic procurement system for film production.
 

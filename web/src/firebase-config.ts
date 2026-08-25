@@ -13,7 +13,7 @@
  *
  * To fill it in:
  *
- *     firebase apps:create web "Agentic Cinema" --project <project-id>
+ *     firebase apps:create web "Greenlit" --project <project-id>
  *     firebase apps:sdkconfig web --project <project-id>
  */
 

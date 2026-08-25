@@ -133,7 +133,7 @@ seed: require-gcloud require-project ## Seed a deployed project with a screenpla
 	uv run python scripts/seed_project.py --project-id $(PROJECT_ID) $(ARGS)
 
 image: ## Build the Cloud Run image (context is the repo root, deliberately)
-	docker build -t agentic-cinema:local .
+	docker build -t greenlit:local .
 
 clean:
 	rm -rf .pytest_cache .ruff_cache **/__pycache__ web/dist

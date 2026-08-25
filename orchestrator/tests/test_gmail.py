@@ -30,7 +30,7 @@ from orchestrator.settings import Settings, TokenBackend
 SETTINGS = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     agent_email="agent@cinema.test",
-    agent_display_name="Agentic Cinema",
+    agent_display_name="Greenlit",
 )
 
 
@@ -228,7 +228,7 @@ async def test_the_from_header_carries_the_display_name() -> None:
 
     _ = await transport.send(to="s@example.test", subject="Quote", body="hi")
 
-    assert _sent_mime(fake)["From"] == "Agentic Cinema <agent@cinema.test>"
+    assert _sent_mime(fake)["From"] == "Greenlit <agent@cinema.test>"
 
 
 # --------------------------------------------------------------------------- #

@@ -369,7 +369,7 @@ if gcloud iam service-accounts describe "$AGENT_EMAIL" >/dev/null 2>&1; then
   skip "$AGENT_EMAIL"
 else
   gcloud iam service-accounts create "$AGENT_SA" \
-    --display-name="Agentic Cinema orchestrator" \
+    --display-name="Greenlit orchestrator" \
     --description="Runs the tick loop. Deliberately cannot write purchase orders." \
     >/dev/null
   ok "$AGENT_EMAIL"

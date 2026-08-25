@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         services.orders_client.close()
 
 
-app = FastAPI(title="Agentic Cinema approvals", lifespan=lifespan)
+app = FastAPI(title="Greenlit approvals", lifespan=lifespan)
 
 
 @app.exception_handler(IllegalTransitionError)

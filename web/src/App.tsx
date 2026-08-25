@@ -45,7 +45,7 @@ export function App() {
     <main style={S.page}>
       <header style={S.header}>
         <h1 style={S.title}>
-          Agentic Cinema {USE_EMULATOR && <span style={S.badge}>emulator</span>}
+          Greenlit {USE_EMULATOR && <span style={S.badge}>emulator</span>}
         </h1>
         {user === null ? (
           <button style={S.button} onClick={attempt(signIn)} type="button">
