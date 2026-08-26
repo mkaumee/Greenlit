@@ -141,13 +141,23 @@ async def poll(settings: Settings) -> int:
     if TRACE.exists():
         expected = json.loads(TRACE.read_text())
 
-    inbound = await _transport(settings).poll()
+    # Only the conversation this script started. Without naming it, polling a
+    # mailbox reads and consumes whatever else is unread in it — which is how
+    # a hundred unrelated messages got marked read the first time this ran
+    # against an account that was also somebody's personal inbox.
+    ours = expected.get("thread_id", "")
+    if not ours:
+        print("\n  No record of a sent message, so there is no thread to check.")
+        print("  Send one first:  make gmail-smoke TO=someone@example.com")
+        return 1
+
+    inbound = await _transport(settings).poll(threads=frozenset({ours}))
     if not inbound:
-        print("\n  Nothing unread.")
-        print("  If you have replied, check the reply went to")
-        print(f"    {settings.agent_email}")
-        print("  and that it is not sitting in spam. Note the poll marks mail")
-        print("  read, so a message already read once will not appear again.")
+        print("\n  Nothing unread in the thread we sent.")
+        print("  Reply to that message rather than composing a new one — a")
+        print("  reply in a fresh thread cannot be filed against a negotiation.")
+        print("  Note the poll marks mail read, so one already read once will")
+        print("  not appear again.")
         return 1
 
     print(f"\n  {len(inbound)} message(s):\n")
@@ -164,7 +174,7 @@ async def poll(settings: Settings) -> int:
             print("    ↳ threaded to the message we sent")
         print()
 
-    if expected and not threaded:
+    if not threaded:
         # The failure worth naming. A reply that arrives but lands in its own
         # thread would be filed against no negotiation, and from the UI that is
         # indistinguishable from a supplier who never answered.

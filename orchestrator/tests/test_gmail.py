@@ -257,7 +257,7 @@ async def test_poll_clears_unread_so_the_next_tick_does_not_re_read_it() -> None
     transport, fake = _transport()
     fake.inbox.append(_inbound())
 
-    _ = await transport.poll()
+    _ = await transport.poll(threads=frozenset({"t-1"}))
 
     assert fake.modified == [("in-1", {"removeLabelIds": ["UNREAD"]})]
 
@@ -480,3 +480,57 @@ def test_nothing_anywhere_returns_nothing(tmp_path: Path) -> None:
     )
 
     assert client_credentials(settings) == ("", "")
+
+
+# --------------------------------------------------------------------------- #
+# Whose mail this is
+# --------------------------------------------------------------------------- #
+#
+# Found the hard way on a real mailbox. poll() marked every unread message read
+# before the tick loop decided whether it belonged to a negotiation; the loop
+# then counted the rest as unmatched and dropped them — after the transport had
+# already consumed them. On an account that was also somebody's personal inbox
+# that cleared a hundred unrelated messages in one pass, and clearing UNREAD
+# cannot be undone.
+
+
+async def test_mail_outside_our_threads_is_not_returned() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-negotiation"),
+        _inbound(message_id="theirs", thread_id="t-newsletter"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    assert [m.message_id for m in got] == ["ours"]
+
+
+async def test_mail_outside_our_threads_is_never_marked_read() -> None:
+    """The half that cannot be undone, and the one that did the damage."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-negotiation"),
+        _inbound(message_id="bank-alert", thread_id="t-bank"),
+        _inbound(message_id="newsletter", thread_id="t-shop"),
+    ]
+
+    _ = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    touched = [message_id for message_id, _ in fake.modified]
+    assert touched == ["ours"], "only our own conversation may be consumed"
+
+
+async def test_polling_without_saying_what_you_own_changes_nothing() -> None:
+    """Inspection is safe; consumption requires naming the threads.
+
+    Destructive by default is how the original bug shipped. A caller that has
+    not said what it owns gets to look and nothing else.
+    """
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="whatever", thread_id="t-anything")]
+
+    got = await transport.poll()
+
+    assert [m.message_id for m in got] == ["whatever"]
+    assert fake.modified == [], "nothing may be marked read"

@@ -82,7 +82,13 @@ from the panel that is indistinguishable from a supplier who never answered.
 
 ## The mailboxes
 
-Two Google accounts, neither of them your personal one:
+Two Google accounts, **neither of them your personal one**:
+
+The agent's poll clears the `UNREAD` label so the tick does not re-read the
+same replies every minute, and that cannot be undone. The transport now only
+touches threads the system started, so a shared mailbox is no longer destroyed
+by a poll — but the agent still reads and marks its own conversations, and a
+personal account is the wrong place for that.
 
 | Mailbox | Purpose |
 | --- | --- |

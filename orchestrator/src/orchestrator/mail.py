@@ -92,8 +92,19 @@ class MailTransport(Protocol):
         """
         ...
 
-    async def poll(self) -> list[RawInbound]:
-        """Everything unread, oldest first, marked read as a side effect.
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        """Unread mail, oldest first.
+
+        ``threads`` is the set of conversations this system started. Give it,
+        and only messages belonging to those are returned — and only those are
+        marked read. Pass nothing and the mailbox is inspected without being
+        modified at all.
+
+        That asymmetry is deliberate. Marking mail read is destructive and
+        irreversible, so it requires naming what you own. An earlier version
+        marked everything unread as read before the loop decided what belonged
+        to a negotiation, and on a mailbox that was also somebody's personal
+        inbox it consumed a hundred messages that had nothing to do with it.
 
         Polled rather than pushed. Pub/Sub push needs a verified domain and buys
         nothing at this scale.
@@ -158,10 +169,16 @@ class InMemoryMailbox:
             thread_id=resolved_thread,
         )
 
-    async def poll(self) -> list[RawInbound]:
-        delivered = self._inbox
-        self._inbox = []
-        return delivered
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        if threads is None:
+            # Read-only inspection, matching the real transport: nothing is
+            # consumed, so a caller that has not said what it owns cannot
+            # destroy anything.
+            return list(self._inbox)
+
+        mine = [m for m in self._inbox if m.thread_id in threads]
+        self._inbox = [m for m in self._inbox if m.thread_id not in threads]
+        return mine
 
     # -- test-side helpers, not part of MailTransport ---------------------- #
 

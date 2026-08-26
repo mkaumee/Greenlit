@@ -8,8 +8,15 @@ SHELL := /bin/bash
 # command-line variables into a recipe's environment unless they are exported,
 # so without this `make gmail-smoke CINEMA_TOKEN_BACKEND=secret-manager` is
 # accepted and silently ignored — worse than being rejected.
+# Conditional, because a bare `export VAR` on an undefined variable exports it
+# as the empty string — and pydantic-settings rejects "" for an enum field, so
+# every target that builds Settings() dies. `make e2e` caught that.
+ifdef CINEMA_TOKEN_BACKEND
 export CINEMA_TOKEN_BACKEND
+endif
+ifdef CINEMA_GCP_PROJECT
 export CINEMA_GCP_PROJECT
+endif
 
 # Cloud resource names, shared by the deploy targets so they cannot drift.
 REGION ?= us-central1
