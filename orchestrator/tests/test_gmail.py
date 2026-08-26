@@ -13,6 +13,7 @@ attachment detection, marking read) is decided here.
 """
 
 import base64
+import json
 from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
@@ -23,6 +24,7 @@ from orchestrator.gmail import (
     FileTokenStore,
     GmailTransport,
     SecretManagerTokenStore,
+    client_credentials,
     token_store_for,
 )
 from orchestrator.settings import Settings, TokenBackend
@@ -255,7 +257,7 @@ async def test_poll_clears_unread_so_the_next_tick_does_not_re_read_it() -> None
     transport, fake = _transport()
     fake.inbox.append(_inbound())
 
-    _ = await transport.poll()
+    _ = await transport.poll(threads=frozenset({"t-1"}))
 
     assert fake.modified == [("in-1", {"removeLabelIds": ["UNREAD"]})]
 
@@ -418,3 +420,117 @@ def test_the_cloud_backend_is_selected_by_configuration_alone() -> None:
         token_backend=TokenBackend.SECRET_MANAGER,
     )
     assert isinstance(token_store_for(cloud), SecretManagerTokenStore)
+
+
+# --------------------------------------------------------------------------- #
+# Where the OAuth client id and secret come from
+# --------------------------------------------------------------------------- #
+#
+# The bootstrap already consented with a client file, so requiring the same two
+# strings again as environment variables was friction and a place to paste the
+# wrong thing. The fallback has to be exact: a resolver that quietly returns
+# the wrong credential fails at Google with invalid_client, which reads like a
+# revoked token rather than a lookup that went to the wrong place.
+
+
+def _client_file(tmp_path: Path, shape: str, ident: str) -> Path:
+    path = tmp_path / "client_secret.json"
+    _ = path.write_text(
+        json.dumps({shape: {"client_id": ident, "client_secret": f"{ident}-secret"}})
+    )
+    return path
+
+
+def test_explicit_settings_beat_the_client_file(tmp_path: Path) -> None:
+    """Cloud Run has no client JSON, so configuration must always win."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_id="from-env",
+        oauth_client_secret="from-env-secret",
+        oauth_client_secrets=_client_file(tmp_path, "installed", "from-file"),
+    )
+
+    assert client_credentials(settings) == ("from-env", "from-env-secret")
+
+
+def test_a_web_client_file_is_read(tmp_path: Path) -> None:
+    """The shape the Cloud Shell consent flow requires — a Web application."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=_client_file(tmp_path, "web", "web-client"),
+    )
+
+    assert client_credentials(settings) == ("web-client", "web-client-secret")
+
+
+def test_a_desktop_client_file_is_read(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=_client_file(tmp_path, "installed", "desktop"),
+    )
+
+    assert client_credentials(settings) == ("desktop", "desktop-secret")
+
+
+def test_nothing_anywhere_returns_nothing(tmp_path: Path) -> None:
+    """Not a partial credential. Callers keep their own refusal message."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        oauth_client_secrets=tmp_path / "absent.json",
+    )
+
+    assert client_credentials(settings) == ("", "")
+
+
+# --------------------------------------------------------------------------- #
+# Whose mail this is
+# --------------------------------------------------------------------------- #
+#
+# Found the hard way on a real mailbox. poll() marked every unread message read
+# before the tick loop decided whether it belonged to a negotiation; the loop
+# then counted the rest as unmatched and dropped them — after the transport had
+# already consumed them. On an account that was also somebody's personal inbox
+# that cleared a hundred unrelated messages in one pass, and clearing UNREAD
+# cannot be undone.
+
+
+async def test_mail_outside_our_threads_is_not_returned() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-negotiation"),
+        _inbound(message_id="theirs", thread_id="t-newsletter"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    assert [m.message_id for m in got] == ["ours"]
+
+
+async def test_mail_outside_our_threads_is_never_marked_read() -> None:
+    """The half that cannot be undone, and the one that did the damage."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-negotiation"),
+        _inbound(message_id="bank-alert", thread_id="t-bank"),
+        _inbound(message_id="newsletter", thread_id="t-shop"),
+    ]
+
+    _ = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    touched = [message_id for message_id, _ in fake.modified]
+    assert touched == ["ours"], "only our own conversation may be consumed"
+
+
+async def test_polling_without_saying_what_you_own_changes_nothing() -> None:
+    """Inspection is safe; consumption requires naming the threads.
+
+    Destructive by default is how the original bug shipped. A caller that has
+    not said what it owns gets to look and nothing else.
+    """
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="whatever", thread_id="t-anything")]
+
+    got = await transport.poll()
+
+    assert [m.message_id for m in got] == ["whatever"]
+    assert fake.modified == [], "nothing may be marked read"

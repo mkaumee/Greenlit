@@ -163,7 +163,11 @@ class TickLoop:
         now = await self._clock.advance(project_id)
         report = TickReport(sim_now=now)
 
-        for raw in await self._mail.poll():
+        # Name what we own before reading the mailbox. The transport only
+        # touches — and only marks read — mail in these conversations, so an
+        # agent sharing a mailbox with a human cannot consume their post.
+        mine = await self._repo.live_thread_ids()
+        for raw in await self._mail.poll(threads=mine):
             await self._file_reply(raw, now, report)
 
         # Items first, so a negotiation opened by this pass gets its opening

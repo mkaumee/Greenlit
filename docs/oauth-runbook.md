@@ -51,11 +51,24 @@ check `/health` and the tick logs, not just whether the service is up.
 Once the token exists, send one email by hand before turning `MAIL_BACKEND=gmail`
 on the deployed tick:
 
+The client id and secret are read from `.secrets/client_secret.json`
+automatically, so nothing needs exporting locally. The deployed service is
+different — no client JSON is in the image, so `CINEMA_OAUTH_CLIENT_ID` and
+`CINEMA_OAUTH_CLIENT_SECRET` are still required for `MAIL_BACKEND=gmail`.
+
 ```bash
-make gmail-smoke TO=your-second-account@gmail.com   # send one
+make gmail-smoke TO=someone@gmail.com CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 # reply from that mailbox, then
-make gmail-smoke POLL=1                             # read it back
+make gmail-smoke POLL=1 CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 ```
+
+`CINEMA_TOKEN_BACKEND` is only needed when the token went to Secret Manager,
+which is the normal case. Without it the script looks for a local file and
+says so, rather than claiming the bootstrap never ran.
+
+**Send to an address that is not the agent's own.** The poll query is
+`is:unread -from:me`, so mail the agent sent to itself is excluded — the reply
+would never appear, which looks like a broken transport and is not.
 
 The transport has always been green against a fake. This is the first thing
 that hands a message to Google, and doing it in isolation means a wrong scope
@@ -69,7 +82,13 @@ from the panel that is indistinguishable from a supplier who never answered.
 
 ## The mailboxes
 
-Two Google accounts, neither of them your personal one:
+Two Google accounts, **neither of them your personal one**:
+
+The agent's poll clears the `UNREAD` label so the tick does not re-read the
+same replies every minute, and that cannot be undone. The transport now only
+touches threads the system started, so a shared mailbox is no longer destroyed
+by a poll — but the agent still reads and marks its own conversations, and a
+personal account is the wrong place for that.
 
 | Mailbox | Purpose |
 | --- | --- |

@@ -411,6 +411,32 @@ class FirestoreRepository:
             )
         return due
 
+    async def live_thread_ids(self) -> frozenset[str]:
+        """Every Gmail thread this system is currently negotiating in.
+
+        The transport is given this so it only ever reads — and only ever marks
+        read — mail in conversations we started. Without it, polling an inbox
+        consumes whatever else happens to be unread in it, which is
+        irreversible and, on a mailbox that is also somebody's personal one,
+        destroys a hundred messages' worth of unread state.
+
+        A collection-group query, like ``due_negotiations``: threads belong to
+        the system rather than to any one project, because an inbound message
+        arrives knowing nothing about which project it concerns.
+        """
+        query = self._db.collection_group(NEGOTIATIONS).where(
+            filter=FieldFilter("gmail_thread_id", "!=", "")
+        )
+        found: set[str] = set()
+        async for snapshot in query.stream():
+            data = snapshot.to_dict()
+            if data is None:
+                continue
+            thread = str(data.get("gmail_thread_id") or "")
+            if thread:
+                found.add(thread)
+        return frozenset(found)
+
     async def find_by_thread(self, thread_id: str) -> DueNegotiation | None:
         """Locate a negotiation from an inbound Gmail thread ID.
 

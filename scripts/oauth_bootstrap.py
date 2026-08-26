@@ -30,7 +30,7 @@ from orchestrator.gmail import token_store_for
 from orchestrator.settings import GMAIL_SCOPES, Settings, TokenBackend
 
 
-def _headless_hint() -> str:
+def _headless_hint(project: str) -> str:
     """How to finish this without a browser on this machine.
 
     Cloud Shell can serve a port publicly, so a *registered* redirect URI works
@@ -51,8 +51,13 @@ def _headless_hint() -> str:
         "   In Cloud Shell that URL is the Web Preview address for port 8080 —\n"
         "   the Web Preview button, 'Preview on port 8080'. Copy it exactly,\n"
         "   including the trailing slash.\n\n"
-        "2. Then run:\n\n"
-        f"       uv run python scripts/oauth_bootstrap.py --redirect-uri '{suggested}'\n\n"
+        "2. Then run this, as ONE line — a pasted backslash-continuation\n"
+        "   breaks if your terminal inserts a blank line after it:\n\n"
+        f"       CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT={project} "
+        f"uv run python scripts/oauth_bootstrap.py --redirect-uri '{suggested}'\n\n"
+        "   CINEMA_TOKEN_BACKEND matters: without it the token is written to a\n"
+        "   local file, which in Cloud Shell is wiped and is not where Cloud Run\n"
+        "   looks anyway.\n\n"
         "   It prints a link. Open it, consent, and the browser lands on a page\n"
         "   that will probably fail to load — that does not matter. Copy the\n"
         "   `code=` value out of the address bar and paste it back here."
@@ -180,7 +185,7 @@ def main() -> int:
     # when consent is being completed by hand against a registered redirect.
     if not redirect_uri and (problem := _cannot_work_here(client_secrets)):
         print(problem)
-        print(_headless_hint())
+        print(_headless_hint(settings.gcp_project))
         return 2
 
     print(f"Scopes: {', '.join(s.rsplit('/', 1)[-1] for s in GMAIL_SCOPES)}")
@@ -222,6 +227,16 @@ def main() -> int:
 
     if settings.token_backend is TokenBackend.FILE:
         print("That path is gitignored. Do not move it somewhere that is not.")
+        if os.environ.get("CLOUD_SHELL") or os.environ.get("GOOGLE_CLOUD_SHELL"):
+            # Easy to miss: the run succeeds, the token exists, and the
+            # deployment still cannot see it. Cloud Shell's home directory is
+            # also not permanent, so this would evaporate.
+            print(
+                "\n  WARNING: that is a file in Cloud Shell, which Cloud Run\n"
+                "  cannot read and which this machine does not keep. Re-run with\n"
+                "  CINEMA_TOKEN_BACKEND=secret-manager to put it where the\n"
+                "  deployed service actually looks."
+            )
 
     print("\nIf the consent screen is still in testing mode, this token dies in")
     print("seven days — shorter than a negotiation. See docs/oauth-runbook.md.")

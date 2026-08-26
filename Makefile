@@ -4,6 +4,20 @@
 # tee's. /bin/sh is dash on Debian and has no `pipefail`, so ask for bash.
 SHELL := /bin/bash
 
+# Settings a person may pass on the make command line. Make does not put
+# command-line variables into a recipe's environment unless they are exported,
+# so without this `make gmail-smoke CINEMA_TOKEN_BACKEND=secret-manager` is
+# accepted and silently ignored — worse than being rejected.
+# Conditional, because a bare `export VAR` on an undefined variable exports it
+# as the empty string — and pydantic-settings rejects "" for an enum field, so
+# every target that builds Settings() dies. `make e2e` caught that.
+ifdef CINEMA_TOKEN_BACKEND
+export CINEMA_TOKEN_BACKEND
+endif
+ifdef CINEMA_GCP_PROJECT
+export CINEMA_GCP_PROJECT
+endif
+
 # Cloud resource names, shared by the deploy targets so they cannot drift.
 REGION ?= us-central1
 APPROVALS_SERVICE ?= cinema-approvals
@@ -159,6 +173,9 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 #
 #   make gmail-smoke TO=seller@example.com   # send one
 #   make gmail-smoke POLL=1                  # read the reply
+#
+# Add CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=... when the token
+# was bootstrapped into Secret Manager rather than a local file.
 gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
 	@if [ -n "$(POLL)" ]; then \
 	  uv run python scripts/gmail_smoke.py --poll; \

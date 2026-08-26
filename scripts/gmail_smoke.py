@@ -27,7 +27,12 @@ import json
 import sys
 from pathlib import Path
 
-from orchestrator.gmail import GmailTransport, build_credentials, token_store_for
+from orchestrator.gmail import (
+    GmailTransport,
+    build_credentials,
+    client_credentials,
+    token_store_for,
+)
 from orchestrator.settings import Settings, TokenBackend
 
 SUBJECT = "Greenlit — transport check"
@@ -49,28 +54,34 @@ depends on — the tick keeps its ids in Firestore like everything else.
 
 
 def _transport(settings: Settings) -> GmailTransport:
-    credentials = build_credentials(
-        token_store_for(settings),
-        settings.oauth_client_id,
-        settings.oauth_client_secret,
-    )
+    client_id, client_secret = client_credentials(settings)
+    credentials = build_credentials(token_store_for(settings), client_id, client_secret)
     return GmailTransport.from_credentials(credentials, settings)
 
 
 def _preflight(settings: Settings) -> str:
     """Why this cannot run, or "" if it can."""
-    if not settings.oauth_client_id or not settings.oauth_client_secret:
+    if not all(client_credentials(settings)):
         return (
-            "CINEMA_OAUTH_CLIENT_ID / CINEMA_OAUTH_CLIENT_SECRET are unset, so "
+            "no OAuth client id and secret. They are read from "
+            f"{settings.oauth_client_secrets} if it is there, or from "
+            "CINEMA_OAUTH_CLIENT_ID / CINEMA_OAUTH_CLIENT_SECRET. Without them "
             "the refresh token cannot be exchanged for an access token."
         )
     if (
         settings.token_backend is TokenBackend.FILE
         and not settings.refresh_token_path.exists()
     ):
+        # Two causes, and this cannot tell them apart — so it must not pick
+        # one. Saying "run the bootstrap" to somebody who has already done it
+        # sends them back through the whole OAuth consent flow for nothing.
         return (
-            f"no refresh token at {settings.refresh_token_path}. Run the "
-            "bootstrap first, on a machine with a browser:\n"
+            f"no refresh token at {settings.refresh_token_path}, and "
+            "CINEMA_TOKEN_BACKEND is 'file' so that is the only place looked.\n\n"
+            "  If you bootstrapped into Secret Manager, point this at it:\n"
+            "    CINEMA_TOKEN_BACKEND=secret-manager "
+            f"CINEMA_GCP_PROJECT={settings.gcp_project} make gmail-smoke TO=...\n\n"
+            "  If the bootstrap genuinely has not run yet:\n"
             "    uv run python scripts/oauth_bootstrap.py"
         )
     return ""
@@ -130,13 +141,23 @@ async def poll(settings: Settings) -> int:
     if TRACE.exists():
         expected = json.loads(TRACE.read_text())
 
-    inbound = await _transport(settings).poll()
+    # Only the conversation this script started. Without naming it, polling a
+    # mailbox reads and consumes whatever else is unread in it — which is how
+    # a hundred unrelated messages got marked read the first time this ran
+    # against an account that was also somebody's personal inbox.
+    ours = expected.get("thread_id", "")
+    if not ours:
+        print("\n  No record of a sent message, so there is no thread to check.")
+        print("  Send one first:  make gmail-smoke TO=someone@example.com")
+        return 1
+
+    inbound = await _transport(settings).poll(threads=frozenset({ours}))
     if not inbound:
-        print("\n  Nothing unread.")
-        print("  If you have replied, check the reply went to")
-        print(f"    {settings.agent_email}")
-        print("  and that it is not sitting in spam. Note the poll marks mail")
-        print("  read, so a message already read once will not appear again.")
+        print("\n  Nothing unread in the thread we sent.")
+        print("  Reply to that message rather than composing a new one — a")
+        print("  reply in a fresh thread cannot be filed against a negotiation.")
+        print("  Note the poll marks mail read, so one already read once will")
+        print("  not appear again.")
         return 1
 
     print(f"\n  {len(inbound)} message(s):\n")
@@ -153,7 +174,7 @@ async def poll(settings: Settings) -> int:
             print("    ↳ threaded to the message we sent")
         print()
 
-    if expected and not threaded:
+    if not threaded:
         # The failure worth naming. A reply that arrives but lands in its own
         # thread would be filed against no negotiation, and from the UI that is
         # indistinguishable from a supplier who never answered.
