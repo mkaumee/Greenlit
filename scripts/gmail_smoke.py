@@ -72,9 +72,16 @@ def _preflight(settings: Settings) -> str:
         settings.token_backend is TokenBackend.FILE
         and not settings.refresh_token_path.exists()
     ):
+        # Two causes, and this cannot tell them apart — so it must not pick
+        # one. Saying "run the bootstrap" to somebody who has already done it
+        # sends them back through the whole OAuth consent flow for nothing.
         return (
-            f"no refresh token at {settings.refresh_token_path}. Run the "
-            "bootstrap first, on a machine with a browser:\n"
+            f"no refresh token at {settings.refresh_token_path}, and "
+            "CINEMA_TOKEN_BACKEND is 'file' so that is the only place looked.\n\n"
+            "  If you bootstrapped into Secret Manager, point this at it:\n"
+            "    CINEMA_TOKEN_BACKEND=secret-manager "
+            f"CINEMA_GCP_PROJECT={settings.gcp_project} make gmail-smoke TO=...\n\n"
+            "  If the bootstrap genuinely has not run yet:\n"
             "    uv run python scripts/oauth_bootstrap.py"
         )
     return ""

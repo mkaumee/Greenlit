@@ -57,10 +57,18 @@ different — no client JSON is in the image, so `CINEMA_OAUTH_CLIENT_ID` and
 `CINEMA_OAUTH_CLIENT_SECRET` are still required for `MAIL_BACKEND=gmail`.
 
 ```bash
-make gmail-smoke TO=your-second-account@gmail.com   # send one
+make gmail-smoke TO=someone@gmail.com CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 # reply from that mailbox, then
-make gmail-smoke POLL=1                             # read it back
+make gmail-smoke POLL=1 CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 ```
+
+`CINEMA_TOKEN_BACKEND` is only needed when the token went to Secret Manager,
+which is the normal case. Without it the script looks for a local file and
+says so, rather than claiming the bootstrap never ran.
+
+**Send to an address that is not the agent's own.** The poll query is
+`is:unread -from:me`, so mail the agent sent to itself is excluded — the reply
+would never appear, which looks like a broken transport and is not.
 
 The transport has always been green against a fake. This is the first thing
 that hands a message to Google, and doing it in isolation means a wrong scope
