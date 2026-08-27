@@ -59,7 +59,22 @@ def _transport(settings: Settings) -> GmailTransport:
     return GmailTransport.from_credentials(credentials, settings)
 
 
-def _preflight(settings: Settings) -> str:
+def _project_for_hint(settings: Settings) -> str:
+    """What to put after ``CINEMA_GCP_PROJECT=`` in a suggested command.
+
+    ``gcp_project`` defaults to ``demo-cinema``, which is the emulator's name
+    and belongs to nobody. Echoing it back produces a command that fails with
+    PROJECT_NOT_FOUND — the same shape of unhelpful advice that has already
+    cost an afternoon once in this repo. When it is still the default, hand
+    over a shell substitution that resolves to whatever gcloud is pointed at
+    instead of a value we are only guessing.
+    """
+    if settings.gcp_project and settings.gcp_project != "demo-cinema":
+        return settings.gcp_project
+    return "$(gcloud config get-value project)"
+
+
+def _preflight(settings: Settings, *, polling: bool) -> str:
     """Why this cannot run, or "" if it can."""
     if not all(client_credentials(settings)):
         return (
@@ -75,12 +90,17 @@ def _preflight(settings: Settings) -> str:
         # Two causes, and this cannot tell them apart — so it must not pick
         # one. Saying "run the bootstrap" to somebody who has already done it
         # sends them back through the whole OAuth consent flow for nothing.
+        # The suggested command repeats what was actually asked for. Printing
+        # `TO=...` at somebody who ran `POLL=1` makes them read the fix as
+        # advice for a different problem.
+        again = "POLL=1" if polling else "TO=seller@example.com"
         return (
             f"no refresh token at {settings.refresh_token_path}, and "
             "CINEMA_TOKEN_BACKEND is 'file' so that is the only place looked.\n\n"
             "  If you bootstrapped into Secret Manager, point this at it:\n"
             "    CINEMA_TOKEN_BACKEND=secret-manager "
-            f"CINEMA_GCP_PROJECT={settings.gcp_project} make gmail-smoke TO=...\n\n"
+            f"CINEMA_GCP_PROJECT={_project_for_hint(settings)} "
+            f"make gmail-smoke {again}\n\n"
             "  If the bootstrap genuinely has not run yet:\n"
             "    uv run python scripts/oauth_bootstrap.py"
         )
@@ -196,7 +216,7 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = Settings()
-    if blocked := _preflight(settings):
+    if blocked := _preflight(settings, polling=bool(args.poll)):
         print(f"\n  Cannot run: {blocked}")
         return 2
 
