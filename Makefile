@@ -174,15 +174,21 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 #   make gmail-smoke TO=seller@example.com   # send one
 #   make gmail-smoke POLL=1                  # read the reply
 #   make gmail-smoke INSPECT=1               # show the thread, change nothing
+#   make gmail-smoke RECENT=1                # unread anywhere, with thread ids
 #
 # INSPECT exists because POLL can only say "nothing unread", which is the same
 # answer for a reply that never arrived and a reply that was opened in Gmail
-# before the poll saw it — opening a message clears UNREAD.
+# before the poll saw it — opening a message clears UNREAD. RECENT answers the
+# one INSPECT cannot: a reply that is not in our thread is somewhere, and where
+# tells you whether Gmail is slow or whether it started its own conversation —
+# the second being the failure the loop can never recover from.
 #
 # Add CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=... when the token
 # was bootstrapped into Secret Manager rather than a local file.
 gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
-	@if [ -n "$(INSPECT)" ]; then \
+	@if [ -n "$(RECENT)" ]; then \
+	  uv run python scripts/gmail_smoke.py --recent; \
+	elif [ -n "$(INSPECT)" ]; then \
 	  uv run python scripts/gmail_smoke.py --inspect; \
 	elif [ -n "$(POLL)" ]; then \
 	  uv run python scripts/gmail_smoke.py --poll; \

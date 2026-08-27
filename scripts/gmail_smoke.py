@@ -164,6 +164,47 @@ def _sent_thread() -> str:
     return trace.get("thread_id", "")
 
 
+async def recent(settings: Settings) -> int:
+    """Unread mail across the whole mailbox, with the thread each landed in.
+
+    The question ``inspect`` cannot answer: a reply that is not in our thread
+    is somewhere, and knowing *where* is the difference between "Gmail has not
+    delivered it yet" and "it started its own conversation and the loop will
+    never see it". The second is the failure that matters, because from the
+    panel it is indistinguishable from a supplier who never wrote back.
+
+    Uses the transport's read-only sample, so it marks nothing. It is a sample:
+    one page, newest first, and it says so rather than implying completeness.
+    """
+    ours = _sent_thread()
+    unread = await _transport(settings).poll()
+    if not unread:
+        print("\n  Nothing unread anywhere in the mailbox.")
+        print("  If you have just replied, Gmail may not have delivered it yet.")
+        return 1
+
+    print(f"\n  {len(unread)} unread message(s), newest first (one page, a sample):\n")
+    matched = False
+    for message in unread:
+        mine = message.thread_id == ours
+        matched = matched or mine
+        print(f"    {'>> OURS' if mine else '       '}  {message.from_email}")
+        print(f"              {message.subject}")
+        print(f"              thread {message.thread_id}")
+        print()
+
+    if matched:
+        print("  A reply is unread in our thread. POLL=1 will return it.")
+        return 0
+
+    print(f"  Nothing unread is in our thread ({ours}).")
+    print("  If one of the above is your reply, Gmail filed it under a")
+    print("  different conversation — which is what composing a new message")
+    print("  does, and what the loop can never recover from. Reply from")
+    print("  inside the original message instead of writing a fresh one.")
+    return 1
+
+
 async def inspect(settings: Settings) -> int:
     """Show the thread as Gmail holds it. Reads nothing, consumes nothing."""
     ours = _sent_thread()
@@ -262,14 +303,20 @@ def main() -> int:
     _ = parser.add_argument(
         "--inspect", action="store_true", help="show the whole thread, changing nothing"
     )
+    _ = parser.add_argument(
+        "--recent", action="store_true", help="unread mail anywhere, with thread ids"
+    )
     _ = parser.add_argument("--yes", action="store_true", help="skip confirmation")
     args = parser.parse_args()
 
     settings = Settings()
-    reading = bool(args.poll) or bool(args.inspect)
+    reading = bool(args.poll) or bool(args.inspect) or bool(args.recent)
     if blocked := _preflight(settings, polling=reading):
         print(f"\n  Cannot run: {blocked}")
         return 2
+
+    if args.recent:
+        return asyncio.run(recent(settings))
 
     if args.inspect:
         return asyncio.run(inspect(settings))

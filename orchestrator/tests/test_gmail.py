@@ -693,3 +693,19 @@ async def test_inspecting_a_thread_that_is_gone_is_an_answer_not_an_error() -> N
     transport, _ = _transport()
 
     assert await transport.inspect_thread("t-never-existed") == []
+
+
+async def test_the_read_only_sample_is_bounded() -> None:
+    """It exists for a person at a terminal, not for the loop.
+
+    Unbounded, it would page a busy mailbox into the console and cost a
+    request per message — and the sample is only ever a hint about where a
+    reply landed, so completeness is not what it is for.
+    """
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id=f"m-{n}", thread_id=f"t-{n}") for n in range(200)]
+
+    sampled = await transport.poll()
+
+    assert len(sampled) == 25
+    assert fake.modified == [], "a sample must never consume"
