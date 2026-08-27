@@ -399,26 +399,63 @@ class GmailTransport:
             for message in thread.get("messages") or []
         ]
 
-    async def _inspect(self) -> list[RawInbound]:
-        """A first-page sample of unread mail, changing nothing.
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+        include_spam_trash: bool = False,
+    ) -> list[ThreadMessage]:
+        """Run one Gmail search and read what it finds. Marks nothing.
 
         For looking at a mailbox by hand. Deliberately not what the loop uses:
-        it is capped and unpaged, so it is a sample and never a complete view.
+        capped and unpaged, so it is a sample and never a complete view — which
+        is precisely the property that made ``messages.list`` the wrong thing
+        to build the loop on.
+
+        ``include_spam_trash`` is the reason this takes an argument at all.
+        Gmail defaults it to false, so every listing this system has ever run
+        has been blind to SPAM and TRASH. A supplier's reply that gets filtered
+        is sitting somewhere we have never once looked, and from the panel that
+        is indistinguishable from a supplier who never wrote back. Diagnostics
+        need to see it; nothing in the loop passes it.
+
+        Returns oldest first — Gmail lists newest first, and reading a
+        conversation backwards is how you misjudge who said what last.
         """
         listing = await asyncio.to_thread(
             lambda: (
                 self._service.users()
                 .messages()
-                .list(userId="me", q=self._settings.poll_query, maxResults=25)
+                .list(
+                    userId="me",
+                    q=query,
+                    maxResults=limit,
+                    includeSpamTrash=include_spam_trash,
+                )
                 .execute()
             )
         )
 
-        received: list[RawInbound] = []
+        found: list[ThreadMessage] = []
         for stub in reversed(listing.get("messages") or []):
             full = await self._fetch(str(stub["id"]))
-            received.append(self._to_inbound(full, str(full.get("threadId") or "")))
-        return received
+            found.append(
+                ThreadMessage(
+                    inbound=self._to_inbound(full, str(full.get("threadId") or "")),
+                    labels=frozenset(full.get("labelIds") or []),
+                )
+            )
+        return found
+
+    async def _inspect(self) -> list[RawInbound]:
+        """The read-only sample behind ``poll()`` with no threads named.
+
+        Unwraps to ``RawInbound`` so ``MailTransport`` keeps one shape and the
+        loop cannot tell the two mailbox implementations apart.
+        """
+        found = await self.search(self._settings.poll_query)
+        return [message.inbound for message in found]
 
     def _to_inbound(self, message: dict[str, Any], thread_id: str) -> RawInbound:
         payload: dict[str, Any] = message.get("payload") or {}

@@ -156,12 +156,66 @@ async def send(settings: Settings, to: str, assume_yes: bool) -> int:
     return 0
 
 
+def _trace() -> dict[str, str]:
+    if not TRACE.exists():
+        return {}
+    loaded: dict[str, str] = json.loads(TRACE.read_text())
+    return loaded
+
+
 def _sent_thread() -> str:
     """The conversation this script started, or "" if it has not sent one."""
-    if not TRACE.exists():
-        return ""
-    trace: dict[str, str] = json.loads(TRACE.read_text())
-    return trace.get("thread_id", "")
+    return _trace().get("thread_id", "")
+
+
+async def find(settings: Settings, address: str) -> int:
+    """Everything from one sender, including spam and trash.
+
+    The question neither ``inspect`` nor ``recent`` can answer. Gmail defaults
+    ``includeSpamTrash`` to false, so a filtered reply is sitting somewhere no
+    listing we run can see — and ``threads.get``, which is the loop's only read
+    path, takes no such parameter at all. If a reply turns up here carrying
+    SPAM, then the agent is structurally blind to filtered mail and that is a
+    product bug rather than a mailbox accident.
+
+    Reads nothing and marks nothing.
+    """
+    who = address or _trace().get("to", "")
+    if not who:
+        print("\n  No address to look for, and none recorded from a send.")
+        print("  Name one:  make gmail-smoke FIND=seller@example.com")
+        return 1
+
+    ours = _sent_thread()
+    found = await _transport(settings).search(
+        f"from:{who}", limit=25, include_spam_trash=True
+    )
+    if not found:
+        print(f"\n  Nothing at all from {who}, spam and trash included.")
+        print("  It never reached this mailbox: check the reply went to")
+        print(f"  {settings.agent_email}, and that it was actually sent.")
+        return 1
+
+    print(f"\n  {len(found)} message(s) from {who}, oldest first:\n")
+    for message in found:
+        print(f"    thread {message.inbound.thread_id}", end="")
+        print("  << ours" if message.inbound.thread_id == ours else "")
+        print(f"    labels {' '.join(sorted(message.labels)) or '(none)'}")
+        print(f"           {message.inbound.subject}")
+        print()
+
+    filtered = [m for m in found if "SPAM" in m.labels or "TRASH" in m.labels]
+    in_thread = [m for m in found if m.inbound.thread_id == ours]
+
+    if filtered:
+        print("  Some of that is in SPAM or TRASH. Gmail hides those from every")
+        print("  listing by default, and threads.get takes no option to include")
+        print("  them — so if a supplier gets filtered, the loop may never see")
+        print("  the reply and the panel will show silence.")
+    if not in_thread:
+        print(f"  None of it is in our thread ({ours}), so the loop could not")
+        print("  file it against a negotiation even if it could see it.")
+    return 0 if in_thread and not filtered else 1
 
 
 async def recent(settings: Settings) -> int:
@@ -174,7 +228,7 @@ async def recent(settings: Settings) -> int:
     panel it is indistinguishable from a supplier who never wrote back.
 
     Uses the transport's read-only sample, so it marks nothing. It is a sample:
-    one page, newest first, and it says so rather than implying completeness.
+    one page, oldest first, and it says so rather than implying completeness.
     """
     ours = _sent_thread()
     unread = await _transport(settings).poll()
@@ -183,7 +237,8 @@ async def recent(settings: Settings) -> int:
         print("  If you have just replied, Gmail may not have delivered it yet.")
         return 1
 
-    print(f"\n  {len(unread)} unread message(s), newest first (one page, a sample):\n")
+    print(f"\n  {len(unread)} unread message(s), one page — a sample.")
+    print("  Oldest first, so the newest thing in the mailbox is the last line.\n")
     matched = False
     for message in unread:
         mine = message.thread_id == ours
@@ -306,14 +361,29 @@ def main() -> int:
     _ = parser.add_argument(
         "--recent", action="store_true", help="unread mail anywhere, with thread ids"
     )
+    _ = parser.add_argument(
+        "--find",
+        nargs="?",
+        const="",
+        default=None,
+        help="all mail from one sender, spam and trash included",
+    )
     _ = parser.add_argument("--yes", action="store_true", help="skip confirmation")
     args = parser.parse_args()
 
     settings = Settings()
-    reading = bool(args.poll) or bool(args.inspect) or bool(args.recent)
+    reading = (
+        bool(args.poll)
+        or bool(args.inspect)
+        or bool(args.recent)
+        or args.find is not None
+    )
     if blocked := _preflight(settings, polling=reading):
         print(f"\n  Cannot run: {blocked}")
         return 2
+
+    if args.find is not None:
+        return asyncio.run(find(settings, str(args.find).strip()))
 
     if args.recent:
         return asyncio.run(recent(settings))

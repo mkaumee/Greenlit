@@ -85,9 +85,23 @@ class _Messages:
         userId: str,  # noqa: N803
         q: str,
         maxResults: int = 100,  # noqa: N803
+        includeSpamTrash: bool = False,  # noqa: N803
     ) -> _Executable:
+        """Newest first, as Gmail returns them, and spam-blind by default.
+
+        Both of those are Gmail's real behaviour and both have bitten us: the
+        ordering because a reversed conversation reads as the wrong person
+        speaking last, and the default because a filtered reply sits somewhere
+        no listing we ran could see.
+        """
         self._fake.queries.append(q)
-        page = self._fake.inbox[:maxResults]
+        self._fake.spam_trash_included.append(includeSpamTrash)
+        visible = [
+            m
+            for m in self._fake.inbox
+            if includeSpamTrash or not {"SPAM", "TRASH"} & set(m.get("labelIds") or [])
+        ]
+        page = list(reversed(visible))[:maxResults]
         return _Executable({"messages": [{"id": m["id"]} for m in page]})
 
     def get(self, *, userId: str, id: str, format: str) -> _Executable:  # noqa: A002, N803
@@ -145,6 +159,7 @@ class FakeGmail:
     inbox: list[dict[str, Any]]
     modified: list[tuple[str, dict[str, Any]]]
     queries: list[str]
+    spam_trash_included: list[bool]
     _users: _Users
 
     def __init__(self) -> None:
@@ -152,6 +167,7 @@ class FakeGmail:
         self.inbox = []
         self.modified = []
         self.queries = []
+        self.spam_trash_included = []
         self._users = _Users(self)
 
     def users(self) -> _Users:
@@ -315,12 +331,17 @@ async def test_poll_excludes_our_own_sent_mail() -> None:
 
 
 async def test_poll_returns_oldest_first() -> None:
-    """Gmail lists newest first; filing them that way inverts the timeline."""
+    """Gmail lists newest first; filing them that way inverts the timeline.
+
+    ``inbox`` is in the order the mailbox received them and the fake hands them
+    back newest first, exactly as Gmail does. Un-reversing that is the
+    transport's job — drop it and this comes out backwards.
+    """
     transport, fake = _transport()
     fake.inbox.extend(
         [
-            _inbound(message_id="newer"),
             _inbound(message_id="older"),
+            _inbound(message_id="newer"),
         ]
     )
 
@@ -709,3 +730,68 @@ async def test_the_read_only_sample_is_bounded() -> None:
 
     assert len(sampled) == 25
     assert fake.modified == [], "a sample must never consume"
+
+
+# --------------------------------------------------------------------------- #
+# The blind spot
+# --------------------------------------------------------------------------- #
+#
+# Gmail's messages.list defaults includeSpamTrash to false. Every listing this
+# system has run has therefore been unable to see a filtered reply — and a
+# supplier whose answer lands in spam is, from the panel, identical to one who
+# never answered. Diagnostics have to be able to look there. Nothing in the
+# loop passes it, because the loop does not list the mailbox at all.
+
+
+async def test_a_filtered_reply_is_invisible_unless_asked_for() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="clean", thread_id="t-1"),
+        _inbound(message_id="filtered", thread_id="t-2", labels=["SPAM", "UNREAD"]),
+    ]
+
+    default = await transport.search("is:unread")
+    widened = await transport.search("is:unread", include_spam_trash=True)
+
+    assert [m.inbound.message_id for m in default] == ["clean"]
+    assert [m.inbound.message_id for m in widened] == ["clean", "filtered"]
+
+
+async def test_search_reports_the_labels_so_spam_can_be_named() -> None:
+    """ "It arrived" and "it arrived in spam" are different answers."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="filtered", labels=["SPAM", "UNREAD"])]
+
+    found = await transport.search("x", include_spam_trash=True)
+
+    assert "SPAM" in found[0].labels
+
+
+async def test_search_consumes_nothing_however_it_is_called() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="a", thread_id="t-1"),
+        _inbound(message_id="b", thread_id="t-2", labels=["SPAM", "UNREAD"]),
+    ]
+
+    _ = await transport.search("x")
+    _ = await transport.search("x", include_spam_trash=True)
+
+    assert fake.modified == []
+
+
+async def test_search_is_capped() -> None:
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id=f"m-{n}", thread_id=f"t-{n}") for n in range(60)]
+
+    assert len(await transport.search("x", limit=5)) == 5
+
+
+async def test_the_loop_never_widens_the_search_to_spam() -> None:
+    """The sample is a debugging affordance. Spam is opt-in, per call."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound()]
+
+    _ = await transport.poll()
+
+    assert fake.spam_trash_included == [False]
