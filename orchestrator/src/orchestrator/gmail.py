@@ -33,6 +33,7 @@ the tick stamps it with ``clock.now()`` — see Hard Rule 2 in CLAUDE.md.
 import asyncio
 import base64
 import json
+from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
@@ -227,6 +228,29 @@ def _walk_parts(payload: dict[str, Any]) -> tuple[str, list[str]]:
     return body_text.strip(), attachments
 
 
+@dataclass(frozen=True)
+class ThreadMessage:
+    """One message in a conversation, with the labels Gmail files it under.
+
+    Only ``inspect_thread`` returns these. The loop deliberately never sees a
+    label: it is handed ``RawInbound`` and cannot tell a read message from an
+    unread one, because deciding that is the transport's job and doing it in
+    two places is how a message gets filed twice.
+    """
+
+    inbound: RawInbound
+    labels: frozenset[str]
+
+    @property
+    def is_unread(self) -> bool:
+        return "UNREAD" in self.labels
+
+    @property
+    def is_ours(self) -> bool:
+        """Sent by us. Gmail keeps our own outbound in the same thread."""
+        return "SENT" in self.labels
+
+
 class GmailTransport:
     """Send and poll one mailbox over the Gmail API."""
 
@@ -346,6 +370,34 @@ class GmailTransport:
                 await self._mark_read(str(message["id"]))
 
         return received
+
+    async def inspect_thread(self, thread_id: str) -> list[ThreadMessage]:
+        """Every message in one conversation, read or unread, changing nothing.
+
+        ``poll`` answers "what is new", and can only ever say "nothing" — which
+        is the same word for a reply that has not arrived and a reply that was
+        opened in Gmail before we got to it. Opening a message clears UNREAD,
+        so a person checking their own mailbox destroys the only evidence poll
+        works from.
+
+        For the product that distinction does not arise: the tick reads a
+        mailbox nobody else is looking at. For a person verifying by hand it is
+        the whole question, so this answers it directly rather than by
+        inference. Marks nothing, so asking is free.
+
+        An absent thread is an empty list, not an error — it is a question, and
+        "there is nothing there" is a real answer to it.
+        """
+        thread = await self._fetch_thread(thread_id)
+        if thread is None:
+            return []
+        return [
+            ThreadMessage(
+                inbound=self._to_inbound(message, thread_id),
+                labels=frozenset(message.get("labelIds") or []),
+            )
+            for message in thread.get("messages") or []
+        ]
 
     async def _inspect(self) -> list[RawInbound]:
         """A first-page sample of unread mail, changing nothing.

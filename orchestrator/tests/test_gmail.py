@@ -640,3 +640,56 @@ async def test_a_thread_that_no_longer_exists_does_not_stop_the_tick() -> None:
     got = await transport.poll(threads=frozenset({"t-alive", "t-deleted"}))
 
     assert [m.message_id for m in got] == ["alive"]
+
+
+# --------------------------------------------------------------------------- #
+# Looking without consuming
+# --------------------------------------------------------------------------- #
+#
+# poll() answers "what is new", and its only negative answer is "nothing" —
+# which covers both a reply that never arrived and a reply somebody opened in
+# Gmail before the poll ran. Opening a message clears UNREAD, so a person
+# checking their own mailbox destroys the evidence poll works from. Inspection
+# separates the two, and must never itself consume anything.
+
+
+async def test_inspection_shows_read_and_unread_alike() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="old", thread_id="t-1", labels=["INBOX"]),
+        _inbound(message_id="new", thread_id="t-1"),
+    ]
+
+    seen = await transport.inspect_thread("t-1")
+
+    assert [m.inbound.message_id for m in seen] == ["old", "new"]
+    assert [m.is_unread for m in seen] == [False, True]
+
+
+async def test_inspection_marks_nothing_read() -> None:
+    """The whole point: asking the question must not change the answer."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="reply", thread_id="t-1")]
+
+    _ = await transport.inspect_thread("t-1")
+
+    assert fake.modified == []
+
+
+async def test_inspection_says_which_messages_are_ours() -> None:
+    """Otherwise the sent copy reads as a reply and the check passes falsely."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-1", labels=["SENT"]),
+        _inbound(message_id="theirs", thread_id="t-1"),
+    ]
+
+    seen = await transport.inspect_thread("t-1")
+
+    assert [m.is_ours for m in seen] == [True, False]
+
+
+async def test_inspecting_a_thread_that_is_gone_is_an_answer_not_an_error() -> None:
+    transport, _ = _transport()
+
+    assert await transport.inspect_thread("t-never-existed") == []

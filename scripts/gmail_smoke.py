@@ -156,16 +156,58 @@ async def send(settings: Settings, to: str, assume_yes: bool) -> int:
     return 0
 
 
-async def poll(settings: Settings) -> int:
-    expected: dict[str, str] = {}
-    if TRACE.exists():
-        expected = json.loads(TRACE.read_text())
+def _sent_thread() -> str:
+    """The conversation this script started, or "" if it has not sent one."""
+    if not TRACE.exists():
+        return ""
+    trace: dict[str, str] = json.loads(TRACE.read_text())
+    return trace.get("thread_id", "")
 
+
+async def inspect(settings: Settings) -> int:
+    """Show the thread as Gmail holds it. Reads nothing, consumes nothing."""
+    ours = _sent_thread()
+    if not ours:
+        print("\n  No record of a sent message, so there is no thread to look at.")
+        print("  Send one first:  make gmail-smoke TO=someone@example.com")
+        return 1
+
+    messages = await _transport(settings).inspect_thread(ours)
+    if not messages:
+        print(f"\n  Thread {ours} has nothing in it, or no longer exists.")
+        return 1
+
+    print(f"\n  thread {ours} — {len(messages)} message(s), oldest first:\n")
+    for message in messages:
+        who = "us" if message.is_ours else message.inbound.from_email
+        state = "unread" if message.is_unread else "read"
+        print(f"    [{state:6}] {who}")
+        print(f"              {message.inbound.subject}")
+        first = message.inbound.body.strip().splitlines()
+        print(f"              {first[0] if first else ''}")
+        print()
+
+    replies = [m for m in messages if not m.is_ours]
+    if not replies:
+        print("  Nobody has replied in this thread yet.")
+        print("  A new message composed from scratch starts its own thread and")
+        print("  would not show up here — reply to ours instead.")
+        return 1
+
+    if not any(m.is_unread for m in replies):
+        print("  The reply is here, but already read — so a poll will not")
+        print("  return it. Opening it in Gmail is enough to do that, and so is")
+        print("  a poll that already consumed it. The round trip did work.")
+        print("  To see poll say so out loud, reply once more and do not open it.")
+    return 0
+
+
+async def poll(settings: Settings) -> int:
     # Only the conversation this script started. Without naming it, polling a
     # mailbox reads and consumes whatever else is unread in it — which is how
     # a hundred unrelated messages got marked read the first time this ran
     # against an account that was also somebody's personal inbox.
-    ours = expected.get("thread_id", "")
+    ours = _sent_thread()
     if not ours:
         print("\n  No record of a sent message, so there is no thread to check.")
         print("  Send one first:  make gmail-smoke TO=someone@example.com")
@@ -174,10 +216,15 @@ async def poll(settings: Settings) -> int:
     inbound = await _transport(settings).poll(threads=frozenset({ours}))
     if not inbound:
         print("\n  Nothing unread in the thread we sent.")
-        print("  Reply to that message rather than composing a new one — a")
-        print("  reply in a fresh thread cannot be filed against a negotiation.")
-        print("  Note the poll marks mail read, so one already read once will")
-        print("  not appear again.")
+        print("  Two different things look like this, and this cannot tell")
+        print("  them apart — so ask, rather than guess:")
+        print("    make gmail-smoke INSPECT=1")
+        print()
+        print("  It lists the whole thread, read or not, and changes nothing.")
+        print("  If your reply is in there, it simply is not unread any more:")
+        print("  opening it in Gmail clears UNREAD, and so does a poll that")
+        print("  already read it once. If it is not, the reply never landed in")
+        print("  this thread — which is what composing a new message does.")
         return 1
 
     print(f"\n  {len(inbound)} message(s):\n")
@@ -189,7 +236,7 @@ async def poll(settings: Settings) -> int:
         if msg.has_attachments:
             print(f"    files      {', '.join(msg.attachment_filenames)}")
         print(f"    body       {msg.body.strip().splitlines()[:1]}")
-        if expected and msg.thread_id == expected.get("thread_id"):
+        if msg.thread_id == ours:
             threaded = True
             print("    ↳ threaded to the message we sent")
         print()
@@ -199,7 +246,7 @@ async def poll(settings: Settings) -> int:
         # thread would be filed against no negotiation, and from the UI that is
         # indistinguishable from a supplier who never answered.
         print("  WARNING: nothing threaded to the message we sent.")
-        print(f"    ours:  {expected.get('thread_id')}")
+        print(f"    ours:  {ours}")
         print("    A reply in a new thread cannot be filed against a")
         print("    negotiation — it looks exactly like silence.")
         return 1
@@ -212,13 +259,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--to", default="", help="one recipient address")
     _ = parser.add_argument("--poll", action="store_true", help="read replies instead")
+    _ = parser.add_argument(
+        "--inspect", action="store_true", help="show the whole thread, changing nothing"
+    )
     _ = parser.add_argument("--yes", action="store_true", help="skip confirmation")
     args = parser.parse_args()
 
     settings = Settings()
-    if blocked := _preflight(settings, polling=bool(args.poll)):
+    reading = bool(args.poll) or bool(args.inspect)
+    if blocked := _preflight(settings, polling=reading):
         print(f"\n  Cannot run: {blocked}")
         return 2
+
+    if args.inspect:
+        return asyncio.run(inspect(settings))
 
     if args.poll:
         return asyncio.run(poll(settings))

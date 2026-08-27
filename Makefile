@@ -173,11 +173,18 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 #
 #   make gmail-smoke TO=seller@example.com   # send one
 #   make gmail-smoke POLL=1                  # read the reply
+#   make gmail-smoke INSPECT=1               # show the thread, change nothing
+#
+# INSPECT exists because POLL can only say "nothing unread", which is the same
+# answer for a reply that never arrived and a reply that was opened in Gmail
+# before the poll saw it — opening a message clears UNREAD.
 #
 # Add CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=... when the token
 # was bootstrapped into Secret Manager rather than a local file.
 gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
-	@if [ -n "$(POLL)" ]; then \
+	@if [ -n "$(INSPECT)" ]; then \
+	  uv run python scripts/gmail_smoke.py --inspect; \
+	elif [ -n "$(POLL)" ]; then \
 	  uv run python scripts/gmail_smoke.py --poll; \
 	else \
 	  [ -n "$(TO)" ] || { echo "make gmail-smoke TO=seller@example.com"; exit 2; }; \
