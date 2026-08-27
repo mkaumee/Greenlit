@@ -193,7 +193,13 @@ class Settings(BaseSettings):
     killed has done a predictable amount of work."""
 
     poll_query: str = "is:unread -from:me"
-    """Gmail search for the inbound poll. Excludes our own sent mail."""
+    """Gmail search for the by-hand inspection poll, and nothing else.
+
+    The loop does not search the mailbox: it fetches the threads it started, by
+    id. A search is capped at one page, so on a busy inbox a supplier's reply
+    can be paged out of view and never read — which is why no code path that
+    matters depends on this string.
+    """
 
     @property
     def refresh_token_path(self) -> Path:

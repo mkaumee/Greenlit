@@ -91,6 +91,7 @@ class _Harness:
         state: NegotiationState = NegotiationState.DRAFTED,
         due: datetime | None = None,
         floor: Money | None = None,
+        thread_id: str = "",
     ) -> None:
         await self.repo.save_negotiation(
             PID,
@@ -100,6 +101,7 @@ class _Harness:
                 supplier_id="sup1",
                 state=state,
                 floor_price=floor,
+                gmail_thread_id=thread_id,
                 next_action_due_at=due if due is not None else T0,
                 created_at=T0,
                 updated_at=T0,
@@ -575,11 +577,54 @@ async def test_a_terminal_negotiation_is_never_examined_again(
     assert report.messages_sent == 0
 
 
-async def test_mail_for_an_unknown_thread_is_counted_not_crashed(
+async def test_mail_for_an_unknown_thread_is_never_even_fetched(
     harness: _Harness,
 ) -> None:
+    """The loop tells the transport which threads are its own.
+
+    This used to be filed and counted after the fact, which meant the mailbox
+    had already been read — and, on the real transport, already marked read.
+    The guard belongs one layer down: mail outside our conversations is not
+    fetched, so there is nothing to count and nothing was consumed.
+    """
     await harness.add_negotiation()
-    _ = harness.mail.deliver(thread_id="thread-we-never-started", body="RM500")
+    foreign = harness.mail.deliver(thread_id="thread-we-never-started", body="RM500")
+
+    report = await harness.loop.run_tick(PID)
+
+    assert report.unmatched_replies == 0
+    assert not report.errors
+    assert harness.mail.pending() == [foreign], "it must still be sitting unread"
+
+
+class _ForgetfulRepository(FirestoreRepository):
+    """Names a thread as live, then cannot find it a moment later.
+
+    The race the transport cannot close: ``live_thread_ids`` reads the whole
+    set at the top of a tick, and a negotiation can be removed between then and
+    ``find_by_thread``. Rare, and the only way the unmatched branch is now
+    reachable at all — which is exactly why it needs holding down.
+    """
+
+    @override
+    async def find_by_thread(self, thread_id: str) -> DueNegotiation | None:
+        return None
+
+
+async def test_a_reply_whose_negotiation_vanished_is_counted_not_crashed(
+    firestore: AsyncClient,
+) -> None:
+    harness = _Harness(firestore)
+    harness.repo = _ForgetfulRepository(firestore)
+    harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
+    harness.loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), harness.mail)
+    await harness.setup_project()
+    await harness.add_negotiation(
+        state=NegotiationState.AWAITING_REPLY,
+        due=T0 + timedelta(days=2),
+        thread_id="thread-1",
+    )
+    _ = harness.mail.deliver(thread_id="thread-1", body="RM500")
 
     report = await harness.loop.run_tick(PID)
 

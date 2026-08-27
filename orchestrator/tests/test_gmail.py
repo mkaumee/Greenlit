@@ -4,6 +4,9 @@
 # same call signature the real client is invoked with, or the tests would not
 # be exercising the calls we actually make.
 # pyright: reportExplicitAny=false, reportAny=false, reportUnusedParameter=false
+# googleapiclient ships no stubs, and HttpError is imported here to build the
+# 404 a deleted thread raises. Same suppression gmail.py carries.
+# pyright: reportMissingTypeStubs=false
 """Gmail transport tests, against a faked API resource.
 
 No network and no credentials, so these run anywhere — which matters because
@@ -19,7 +22,9 @@ from email.message import Message
 from pathlib import Path
 from typing import Any, final
 
+import httplib2
 import pytest
+from googleapiclient.errors import HttpError
 from orchestrator.gmail import (
     FileTokenStore,
     GmailTransport,
@@ -39,6 +44,11 @@ SETTINGS = Settings(
 # --------------------------------------------------------------------------- #
 # A stand-in for googleapiclient's resource object
 # --------------------------------------------------------------------------- #
+
+
+def _not_found() -> HttpError:
+    """What googleapiclient raises for a thread that is gone."""
+    return HttpError(resp=httplib2.Response({"status": 404}), content=b"not found")
 
 
 @final
@@ -69,9 +79,16 @@ class _Messages:
             }
         )
 
-    def list(self, *, userId: str, q: str) -> _Executable:  # noqa: N803
+    def list(
+        self,
+        *,
+        userId: str,  # noqa: N803
+        q: str,
+        maxResults: int = 100,  # noqa: N803
+    ) -> _Executable:
         self._fake.queries.append(q)
-        return _Executable({"messages": [{"id": m["id"]} for m in self._fake.inbox]})
+        page = self._fake.inbox[:maxResults]
+        return _Executable({"messages": [{"id": m["id"]} for m in page]})
 
     def get(self, *, userId: str, id: str, format: str) -> _Executable:  # noqa: A002, N803
         for message in self._fake.inbox:
@@ -85,14 +102,39 @@ class _Messages:
 
 
 @final
+class _Threads:
+    """Gmail's threads resource, which is what the loop actually reads.
+
+    The mailbox is never listed for the loop's benefit: threads are fetched by
+    id, so a busy inbox cannot page a supplier's reply out of view.
+    """
+
+    _fake: FakeGmail
+
+    def __init__(self, fake: FakeGmail) -> None:
+        self._fake = fake
+
+    def get(self, *, userId: str, id: str, format: str) -> _Executable:  # noqa: A002, N803
+        messages = [m for m in self._fake.inbox if m.get("threadId") == id]
+        if not messages:
+            raise _not_found()
+        return _Executable({"id": id, "messages": messages})
+
+
+@final
 class _Users:
     _messages: _Messages
+    _threads: _Threads
 
     def __init__(self, fake: FakeGmail) -> None:
         self._messages = _Messages(fake)
+        self._threads = _Threads(fake)
 
     def messages(self) -> _Messages:
         return self._messages
+
+    def threads(self) -> _Threads:
+        return self._threads
 
 
 @final
@@ -131,6 +173,7 @@ def _inbound(
     thread_id: str = "t-1",
     headers: list[dict[str, str]] | None = None,
     payload: dict[str, Any] | None = None,
+    labels: list[str] | None = None,
 ) -> dict[str, Any]:
     base_headers = headers or [
         {"name": "From", "value": "seller@example.test"},
@@ -140,6 +183,7 @@ def _inbound(
     return {
         "id": message_id,
         "threadId": thread_id,
+        "labelIds": ["INBOX", "UNREAD"] if labels is None else labels,
         "payload": payload
         or {
             "mimeType": "text/plain",
@@ -534,3 +578,65 @@ async def test_polling_without_saying_what_you_own_changes_nothing() -> None:
 
     assert [m.message_id for m in got] == ["whatever"]
     assert fake.modified == [], "nothing may be marked read"
+
+
+# --------------------------------------------------------------------------- #
+# Why the mailbox is never listed
+# --------------------------------------------------------------------------- #
+#
+# messages.list returns at most a hundred per page, and was called unpaged. A
+# supplier's reply on a busy mailbox fell off page one and was never read: the
+# negotiation ran out its rounds and closed as though nobody had answered.
+# Silence is what a supplier going quiet looks like, so nothing looked wrong.
+
+
+async def test_a_reply_is_found_under_a_hundred_newer_unread_messages() -> None:
+    """The regression that started this. Ours is last; it is still returned."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id=f"noise-{n}", thread_id=f"t-noise-{n}") for n in range(100)
+    ]
+    fake.inbox.append(_inbound(message_id="reply", thread_id="t-negotiation"))
+
+    got = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    assert [m.message_id for m in got] == ["reply"]
+    assert fake.queries == [], "the loop must not list the mailbox at all"
+
+
+async def test_our_own_sent_mail_in_the_thread_is_not_read_back_as_a_reply() -> None:
+    """Gmail keeps our outbound in the same thread. Filing it would have the
+    agent answering itself."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours-out", thread_id="t-1", labels=["SENT", "UNREAD"]),
+        _inbound(message_id="theirs", thread_id="t-1"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert [m.message_id for m in got] == ["theirs"]
+    assert [message_id for message_id, _ in fake.modified] == ["theirs"]
+
+
+async def test_a_message_already_filed_is_not_returned_a_second_time() -> None:
+    """UNREAD is the only record of what a previous tick consumed."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="filed", thread_id="t-1", labels=["INBOX"]),
+        _inbound(message_id="fresh", thread_id="t-1"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert [m.message_id for m in got] == ["fresh"]
+
+
+async def test_a_thread_that_no_longer_exists_does_not_stop_the_tick() -> None:
+    """One deleted conversation must not strand every other negotiation."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="alive", thread_id="t-alive")]
+
+    got = await transport.poll(threads=frozenset({"t-alive", "t-deleted"}))
+
+    assert [m.message_id for m in got] == ["alive"]

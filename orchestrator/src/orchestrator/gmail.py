@@ -40,6 +40,7 @@ from typing import Any, Protocol
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from orchestrator.mail import RawInbound, SentMessage
 from orchestrator.settings import GMAIL_SCOPES, Settings, TokenBackend
@@ -296,64 +297,106 @@ class GmailTransport:
         )
 
     async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
-        """Read unread mail belonging to conversations we started.
+        """Read unread replies in the conversations we started.
 
-        ``threads`` is those conversations. Only messages in them are returned,
-        and **only those have UNREAD cleared**. Pass nothing and the mailbox is
-        inspected without being modified.
+        ``threads`` is those conversations, and each is fetched **by id**. The
+        mailbox is never listed, so nothing can be paged out of view and
+        nothing outside our own threads is touched. Only messages returned have
+        UNREAD cleared.
 
-        This used to mark every unread message read before the tick loop
-        decided whether it belonged to a negotiation at all — the loop then
-        counted the rest as ``unmatched_replies`` and dropped them, after the
-        transport had already consumed them. Run against a mailbox that was
-        also somebody's personal inbox, it cleared a hundred unrelated messages
-        in one pass. Clearing UNREAD cannot be undone, so the destructive half
-        now requires the caller to say what it owns.
+        Two bugs live here, both found on a real mailbox, and both silent:
 
-        Returns oldest first. Gmail lists newest first, so the result is
-        reversed — otherwise a supplier who sent two messages between ticks
-        would have them filed in the wrong order in the timeline.
+        The transport used to mark every unread message read before the tick
+        loop decided whether it belonged to a negotiation. On an account that
+        was also somebody's personal inbox that consumed a hundred unrelated
+        messages in one pass, and clearing UNREAD cannot be undone.
+
+        Worse, it found those messages with ``messages.list``, which returns at
+        most a hundred per page and was called without paging. A supplier's
+        reply on a busy mailbox simply fell off page one and was never read —
+        the negotiation then ran out its rounds and closed as though nobody had
+        answered. Nothing errored and nothing logged. Fetching known threads
+        directly makes the cost scale with live negotiations rather than with
+        the size of somebody's inbox, and makes that failure impossible rather
+        than unlikely.
+
+        Returns oldest first within each thread, which is the order Gmail
+        stores them — a supplier who sends twice between ticks must not have
+        them filed backwards in the timeline.
+        """
+        if threads is None:
+            return await self._inspect()
+
+        received: list[RawInbound] = []
+        for thread_id in sorted(threads):
+            thread = await self._fetch_thread(thread_id)
+            if thread is None:
+                # Deleted, or never ours. One missing thread must not stop a
+                # tick that has other negotiations to advance.
+                continue
+
+            for message in thread.get("messages") or []:
+                labels: list[str] = message.get("labelIds") or []
+                if "UNREAD" not in labels:
+                    continue  # already filed on an earlier tick
+                if "SENT" in labels:
+                    continue  # our own outbound, echoed back in the thread
+
+                received.append(self._to_inbound(message, thread_id))
+                await self._mark_read(str(message["id"]))
+
+        return received
+
+    async def _inspect(self) -> list[RawInbound]:
+        """A first-page sample of unread mail, changing nothing.
+
+        For looking at a mailbox by hand. Deliberately not what the loop uses:
+        it is capped and unpaged, so it is a sample and never a complete view.
         """
         listing = await asyncio.to_thread(
             lambda: (
                 self._service.users()
                 .messages()
-                .list(userId="me", q=self._settings.poll_query)
+                .list(userId="me", q=self._settings.poll_query, maxResults=25)
                 .execute()
             )
         )
 
         received: list[RawInbound] = []
         for stub in reversed(listing.get("messages") or []):
-            message_id = str(stub["id"])
-            full = await self._fetch(message_id)
+            full = await self._fetch(str(stub["id"]))
+            received.append(self._to_inbound(full, str(full.get("threadId") or "")))
+        return received
 
-            payload: dict[str, Any] = full.get("payload") or {}
-            headers: list[dict[str, str]] = payload.get("headers") or []
-            body, attachments = _walk_parts(payload)
+    def _to_inbound(self, message: dict[str, Any], thread_id: str) -> RawInbound:
+        payload: dict[str, Any] = message.get("payload") or {}
+        headers: list[dict[str, str]] = payload.get("headers") or []
+        body, attachments = _walk_parts(payload)
+        return RawInbound(
+            message_id=str(message["id"]),
+            rfc822_message_id=_header(headers, "Message-ID"),
+            thread_id=thread_id,
+            from_email=_header(headers, "From"),
+            subject=_header(headers, "Subject"),
+            body=body,
+            has_attachments=bool(attachments),
+            attachment_filenames=attachments,
+        )
 
-            thread = str(full.get("threadId") or "")
-            if threads is not None and thread not in threads:
-                # Not ours. Not read, not returned, not touched.
-                continue
-
-            received.append(
-                RawInbound(
-                    message_id=message_id,
-                    rfc822_message_id=_header(headers, "Message-ID"),
-                    thread_id=thread,
-                    from_email=_header(headers, "From"),
-                    subject=_header(headers, "Subject"),
-                    body=body,
-                    has_attachments=bool(attachments),
-                    attachment_filenames=attachments,
+    async def _fetch_thread(self, thread_id: str) -> dict[str, Any] | None:
+        try:
+            return await asyncio.to_thread(
+                lambda: (
+                    self._service.users()
+                    .threads()
+                    .get(userId="me", id=thread_id, format="full")
+                    .execute()
                 )
             )
-
-            if threads is not None:
-                await self._mark_read(message_id)
-
-        return received
+        except HttpError as exc:
+            if exc.resp.status == 404:
+                return None
+            raise
 
     async def _fetch(self, message_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(
