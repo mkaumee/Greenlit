@@ -399,6 +399,38 @@ class GmailTransport:
             for message in thread.get("messages") or []
         ]
 
+    async def restore_unread(self, thread_id: str) -> list[str]:
+        """Put UNREAD back on the replies in one thread. Returns what changed.
+
+        The exact mirror of ``_mark_read``, and the only write in this class
+        outside sending. It exists because the live round-trip check had no way
+        to re-arm itself: proving ``poll`` returns a reply needs an unread
+        reply, and once one has been read the only way back was to ask a person
+        to send another and then not look at their own inbox. That failed three
+        times, which is a fair sign it was the wrong instruction to be giving.
+
+        Scoped to a single named thread on purpose. It cannot re-arm a mailbox,
+        only a conversation we started, and it is not on ``MailTransport`` — the
+        tick loop has no way to reach it and no reason to. Reversible by
+        definition: the next poll clears the label again, which is the point.
+
+        ``SENT`` messages are skipped. Poll ignores our own outbound anyway, so
+        marking it unread would put nothing but noise in somebody's inbox.
+        """
+        thread = await self._fetch_thread(thread_id)
+        if thread is None:
+            return []
+
+        rearmed: list[str] = []
+        for message in thread.get("messages") or []:
+            labels: list[str] = message.get("labelIds") or []
+            if "SENT" in labels:
+                continue
+            message_id = str(message["id"])
+            await self._mark_unread(message_id)
+            rearmed.append(message_id)
+        return rearmed
+
     async def search(
         self,
         query: str,
@@ -493,6 +525,21 @@ class GmailTransport:
                 self._service.users()
                 .messages()
                 .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+        )
+
+    async def _mark_unread(self, message_id: str) -> None:
+        """Set UNREAD. Only ``restore_unread`` calls this."""
+        _ = await asyncio.to_thread(
+            lambda: (
+                self._service.users()
+                .messages()
+                .modify(
+                    userId="me",
+                    id=message_id,
+                    body={"addLabelIds": ["UNREAD"]},
+                )
                 .execute()
             )
         )

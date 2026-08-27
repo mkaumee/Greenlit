@@ -168,6 +168,37 @@ def _sent_thread() -> str:
     return _trace().get("thread_id", "")
 
 
+async def rearm(settings: Settings) -> int:
+    """Put UNREAD back on the replies in our thread, so POLL can prove itself.
+
+    Proving ``poll`` returns a live reply needs an unread reply, and the two we
+    have were consumed long ago. Asking for another one, three times, did not
+    work — it depends on somebody replying inside the thread *and* not opening
+    their own inbox afterwards, and opening it is the natural thing to do.
+
+    So re-arm what we already own. Touches only the conversation this script
+    started, never our own outbound, and the next poll clears the label again.
+    """
+    ours = _sent_thread()
+    if not ours:
+        print("\n  No record of a sent message, so there is nothing to re-arm.")
+        print("  Send one first:  make gmail-smoke TO=someone@example.com")
+        return 1
+
+    rearmed = await _transport(settings).restore_unread(ours)
+    if not rearmed:
+        print(f"\n  Nothing to re-arm in thread {ours}.")
+        print("  Either it holds only our own outbound, or it no longer exists.")
+        return 1
+
+    print(f"\n  Marked {len(rearmed)} message(s) unread in thread {ours}:")
+    for message_id in rearmed:
+        print(f"    {message_id}")
+    print("\n  Now prove the last link:  make gmail-smoke POLL=1")
+    print("  That will read them and clear the label again.")
+    return 0
+
+
 async def find(settings: Settings, address: str) -> int:
     """Everything from one sender, including spam and trash.
 
@@ -362,6 +393,11 @@ def main() -> int:
         "--recent", action="store_true", help="unread mail anywhere, with thread ids"
     )
     _ = parser.add_argument(
+        "--rearm",
+        action="store_true",
+        help="mark our thread's replies unread again, so --poll can be re-run",
+    )
+    _ = parser.add_argument(
         "--find",
         nargs="?",
         const="",
@@ -377,10 +413,14 @@ def main() -> int:
         or bool(args.inspect)
         or bool(args.recent)
         or args.find is not None
+        or bool(args.rearm)
     )
     if blocked := _preflight(settings, polling=reading):
         print(f"\n  Cannot run: {blocked}")
         return 2
+
+    if args.rearm:
+        return asyncio.run(rearm(settings))
 
     if args.find is not None:
         return asyncio.run(find(settings, str(args.find).strip()))

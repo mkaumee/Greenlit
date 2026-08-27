@@ -176,6 +176,7 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 #   make gmail-smoke INSPECT=1               # show the thread, change nothing
 #   make gmail-smoke RECENT=1                # unread anywhere, with thread ids
 #   make gmail-smoke FIND=1                  # all mail from the seller, spam too
+#   make gmail-smoke REARM=1                 # make our thread's replies unread
 #
 # INSPECT exists because POLL can only say "nothing unread", which is the same
 # answer for a reply that never arrived and a reply that was opened in Gmail
@@ -184,12 +185,16 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 # tells you whether Gmail is slow or whether it started its own conversation —
 # the second being the failure the loop can never recover from. FIND goes one
 # further and looks in SPAM and TRASH, which Gmail hides from every listing by
-# default — so a filtered reply is somewhere nothing else here can see.
+# default — so a filtered reply is somewhere nothing else here can see. REARM
+# resets the check against replies we already have, rather than depending on
+# somebody sending another one and then not opening their own inbox.
 #
 # Add CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=... when the token
 # was bootstrapped into Secret Manager rather than a local file.
 gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
-	@if [ -n "$(FIND)" ]; then \
+	@if [ -n "$(REARM)" ]; then \
+	  uv run python scripts/gmail_smoke.py --rearm; \
+	elif [ -n "$(FIND)" ]; then \
 	  if [ "$(FIND)" = "1" ]; then \
 	    uv run python scripts/gmail_smoke.py --find; \
 	  else \

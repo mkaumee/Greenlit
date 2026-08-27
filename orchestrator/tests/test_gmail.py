@@ -32,6 +32,7 @@ from orchestrator.gmail import (
     client_credentials,
     token_store_for,
 )
+from orchestrator.mail import InMemoryMailbox, MailTransport
 from orchestrator.settings import Settings, TokenBackend
 
 SETTINGS = Settings(
@@ -112,6 +113,17 @@ class _Messages:
 
     def modify(self, *, userId: str, id: str, body: dict[str, Any]) -> _Executable:  # noqa: A002, N803
         self._fake.modified.append((id, body))
+        # Labels are the real state the transport reads back on the next call,
+        # so the fake has to actually apply them — otherwise re-arming a
+        # message and then polling for it would pass without the label
+        # changing at all.
+        for message in self._fake.inbox:
+            if message["id"] != id:
+                continue
+            labels = set(message.get("labelIds") or [])
+            labels |= set(body.get("addLabelIds") or [])
+            labels -= set(body.get("removeLabelIds") or [])
+            message["labelIds"] = sorted(labels)
         return _Executable({})
 
 
@@ -795,3 +807,54 @@ async def test_the_loop_never_widens_the_search_to_spam() -> None:
     _ = await transport.poll()
 
     assert fake.spam_trash_included == [False]
+
+
+# --------------------------------------------------------------------------- #
+# Re-arming
+# --------------------------------------------------------------------------- #
+#
+# The live check had no way to reset itself. Proving poll returns a reply needs
+# an unread reply, and once one has been read the only route back was asking a
+# person to send another and then not look at their own inbox. That failed
+# three times in a row, which says more about the instruction than the person.
+
+
+async def test_rearming_makes_a_read_reply_pollable_again() -> None:
+    """Both halves in one test, because that is the whole claim."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="reply", thread_id="t-1", labels=["INBOX"])]
+
+    rearmed = await transport.restore_unread("t-1")
+    received = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert rearmed == ["reply"]
+    assert [m.message_id for m in received] == ["reply"]
+
+
+async def test_our_own_sent_mail_is_not_rearmed() -> None:
+    """Poll skips it anyway, so this would be noise in somebody's inbox."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-1", labels=["SENT"]),
+        _inbound(message_id="theirs", thread_id="t-1", labels=["INBOX"]),
+    ]
+
+    assert await transport.restore_unread("t-1") == ["theirs"]
+
+
+async def test_rearming_a_thread_that_is_gone_is_not_an_error() -> None:
+    transport, _ = _transport()
+
+    assert await transport.restore_unread("t-never-existed") == []
+
+
+def test_the_loop_cannot_rearm_anything() -> None:
+    """``restore_unread`` is a write, and the tick loop has no business with it.
+
+    Same shape of guard as the one asserting the tick app exposes no /approve
+    route: the boundary is worth asserting rather than remembering. A method
+    absent from the protocol cannot be called through it, whichever transport
+    is wired in.
+    """
+    assert not hasattr(MailTransport, "restore_unread")
+    assert not hasattr(InMemoryMailbox, "restore_unread")
