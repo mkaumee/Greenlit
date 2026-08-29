@@ -48,6 +48,7 @@ from cinema_contracts import (
 
 from orchestrator.clock import SimClock
 from orchestrator.mail import MailTransport, RawInbound
+from orchestrator.mailboxes import MailboxProvider
 from orchestrator.records import MessageRecord, NegotiationRecord
 from orchestrator.repository import DueNegotiation, FirestoreRepository
 from orchestrator.sourcing import SourcingLoop
@@ -120,6 +121,14 @@ class TickReport:
     a number that climbs is the signal that ticks are running long."""
     messages_sent: int = 0
     escalated: int = 0
+    mailbox_missing: bool = False
+    """No mailbox to send from, so negotiations were left where they were.
+
+    Reported rather than raised, and reported rather than left implicit: a
+    producer whose refresh token expired — seven days, in a consent screen that
+    stays in Testing — otherwise looks exactly like a project with nothing due.
+    Those two must never render the same way.
+    """
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -143,7 +152,7 @@ class TickLoop:
     _repo: FirestoreRepository
     _clock: SimClock
     _brain: AgentBrain
-    _mail: MailTransport
+    _mailboxes: MailboxProvider
     _sourcing: SourcingLoop
 
     def __init__(
@@ -151,24 +160,33 @@ class TickLoop:
         repo: FirestoreRepository,
         clock: SimClock,
         brain: AgentBrain,
-        mail: MailTransport,
+        mailboxes: MailboxProvider,
     ) -> None:
         self._repo = repo
         self._clock = clock
         self._brain = brain
-        self._mail = mail
+        self._mailboxes = mailboxes
         self._sourcing = SourcingLoop(repo, brain)
 
     async def run_tick(self, project_id: str, *, limit: int = 50) -> TickReport:
         now = await self._clock.advance(project_id)
         report = TickReport(sim_now=now)
 
-        # Name what we own before reading the mailbox. The transport only
-        # touches — and only marks read — mail in these conversations, so an
-        # agent sharing a mailbox with a human cannot consume their post.
-        mine = await self._repo.live_thread_ids()
-        for raw in await self._mail.poll(threads=mine):
-            await self._file_reply(raw, now, report)
+        # Whose mailbox this project sends from, resolved per tick and held
+        # across nothing. A producer who has not connected one — or whose
+        # refresh token has expired, which happens every seven days in a
+        # consent screen that stays in Testing — has nowhere to send.
+        mail = await self._mailboxes.for_project(project_id)
+        if mail is None:
+            report.mailbox_missing = True
+
+        if mail is not None:
+            # Name what we own before reading the mailbox. The transport only
+            # touches — and only marks read — mail in these conversations, so
+            # an agent sharing a mailbox with a human cannot consume their post.
+            mine = await self._repo.live_thread_ids()
+            for raw in await mail.poll(threads=mine):
+                await self._file_reply(raw, now, report)
 
         # Items first, so a negotiation opened by this pass gets its opening
         # email in the same pass rather than waiting a minute for the next one.
@@ -179,9 +197,17 @@ class TickLoop:
         report.claims_lost += sourcing.claims_lost
         report.errors.extend(sourcing.errors)
 
+        if mail is None:
+            # Sourcing above still ran: researching an item costs nothing and
+            # is worth having done by the time a mailbox appears. Advancing a
+            # negotiation is different — every move that matters ends in a
+            # message, so the rows are left due rather than claimed, decided
+            # and then found undeliverable.
+            return report
+
         for due in await self._repo.due_negotiations(now, limit=limit):
             try:
-                await self._advance_negotiation(due, now, report)
+                await self._advance_negotiation(due, mail, now, report)
             except Exception as exc:
                 # One negotiation must not take the rest of the project down
                 # with it — over five days, a project that stops being ticked is
@@ -300,7 +326,11 @@ class TickLoop:
     # ------------------------------------------------------------------ #
 
     async def _advance_negotiation(
-        self, due: DueNegotiation, now: datetime, report: TickReport
+        self,
+        due: DueNegotiation,
+        mail: MailTransport,
+        now: datetime,
+        report: TickReport,
     ) -> None:
         record = due.record
         report.negotiations_examined += 1
@@ -382,7 +412,7 @@ class TickLoop:
             # Threading is built from RFC-822 header ids, never from the
             # transport's own message id. See SentMessage in mail.py for why
             # confusing the two silently shreds the supplier's thread.
-            sent = await self._mail.send(
+            sent = await mail.send(
                 to=supplier.email,
                 subject=move.draft_subject or f"Regarding {record.item_id}",
                 body=move.draft_body,

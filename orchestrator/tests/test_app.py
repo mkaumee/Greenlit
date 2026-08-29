@@ -23,6 +23,7 @@ from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.app import Services, app, build_brain, build_mail, services_of
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
 from orchestrator.mail import InMemoryMailbox
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import (
     ItemRecord,
     NegotiationRecord,
@@ -52,7 +53,7 @@ def _services(client: AsyncClient) -> Services:
         clock=clock,
         brain=brain,
         mail=mail,
-        loop=TickLoop(repo, clock, brain, mail),
+        loop=TickLoop(repo, clock, brain, SingleMailbox(mail)),
     )
 
 

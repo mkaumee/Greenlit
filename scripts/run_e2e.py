@@ -48,6 +48,7 @@ from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.app import Services, app
 from orchestrator.clock import FrozenRealTime, SimClock
 from orchestrator.mail import InMemoryMailbox
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import ItemStatus
 from orchestrator.repository import FirestoreRepository, OrdersRepository
 from orchestrator.settings import Settings
@@ -343,7 +344,7 @@ async def run() -> int:
         clock=clock,
         brain=brain,
         mail=mail,
-        loop=TickLoop(repo, clock, brain, mail),
+        loop=TickLoop(repo, clock, brain, SingleMailbox(mail)),
     )
     api = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://e2e"

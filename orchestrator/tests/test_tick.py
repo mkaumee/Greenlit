@@ -14,7 +14,7 @@ The two that matter most:
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import override
+from typing import final, override
 
 import pytest
 from cinema_contracts import (
@@ -28,9 +28,11 @@ from cinema_contracts import (
 from cinema_contracts.testing import ScriptedBrain
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
-from orchestrator.mail import InMemoryMailbox
+from orchestrator.mail import InMemoryMailbox, MailTransport
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import (
     ItemRecord,
+    ItemStatus,
     NegotiationRecord,
     ProjectRecord,
     SupplierRecord,
@@ -57,7 +59,9 @@ class _Harness:
         self.repo = FirestoreRepository(client)
         self.clock = SimClock(self.repo, FrozenRealTime(REAL0))
         self.mail = InMemoryMailbox()
-        self.loop = TickLoop(self.repo, self.clock, brain or ScriptedBrain(), self.mail)
+        self.loop = TickLoop(
+            self.repo, self.clock, brain or ScriptedBrain(), SingleMailbox(self.mail)
+        )
 
     async def setup_project(self) -> None:
         await self.repo.create_project(
@@ -617,7 +621,9 @@ async def test_a_reply_whose_negotiation_vanished_is_counted_not_crashed(
     harness = _Harness(firestore)
     harness.repo = _ForgetfulRepository(firestore)
     harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
-    harness.loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), harness.mail)
+    harness.loop = TickLoop(
+        harness.repo, harness.clock, ScriptedBrain(), SingleMailbox(harness.mail)
+    )
     await harness.setup_project()
     await harness.add_negotiation(
         state=NegotiationState.AWAITING_REPLY,
@@ -683,7 +689,9 @@ def _racing_loop(client: AsyncClient, barrier: asyncio.Barrier) -> _Harness:
     harness = _Harness(client)
     harness.repo = _RendezvousRepository(client, barrier)
     harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
-    harness.loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), harness.mail)
+    harness.loop = TickLoop(
+        harness.repo, harness.clock, ScriptedBrain(), SingleMailbox(harness.mail)
+    )
     return harness
 
 
@@ -737,3 +745,75 @@ async def test_the_loser_leaves_the_negotiation_alone(
     assert record.state is NegotiationState.AWAITING_REPLY
     assert record.last_outbound_at == T0
     assert record.gmail_thread_id, "the winner's thread id survived"
+
+
+# --------------------------------------------------------------------------- #
+# A project with no mailbox
+# --------------------------------------------------------------------------- #
+#
+# Producers connect their own Gmail, so a project can exist before there is
+# anywhere to send from — and a refresh token issued by a consent screen in
+# Testing dies after seven days, which is shorter than a negotiation. Neither
+# case may look like "nothing was due".
+
+
+@final
+class _NoMailbox:
+    """A producer who has not connected, or whose token has expired."""
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return None
+
+
+def _unmailed(harness: _Harness) -> TickLoop:
+    return TickLoop(harness.repo, harness.clock, ScriptedBrain(), _NoMailbox())
+
+
+async def test_a_project_with_no_mailbox_says_so(harness: _Harness) -> None:
+    await harness.add_negotiation()
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.mailbox_missing
+    assert not report.errors, "a missing mailbox is a state, not a failure"
+
+
+async def test_no_mailbox_leaves_the_negotiation_where_it_was(
+    harness: _Harness,
+) -> None:
+    """Not claimed, not decided, not half-advanced.
+
+    Every move that matters ends in a message. Claiming a row and asking the
+    brain for a counter-offer we then cannot deliver would burn a negotiation
+    round on a supplier who never heard from us, and park the row for the lease
+    on the way through.
+    """
+    await harness.add_negotiation()
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.negotiations_examined == 0
+    assert report.messages_sent == 0
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert record.state is NegotiationState.DRAFTED
+    assert record.next_action_due_at == T0, "still due, untouched"
+
+
+async def test_research_still_happens_without_a_mailbox(harness: _Harness) -> None:
+    """Costs nothing and is worth having done by the time one is connected."""
+    await harness.repo.save_item(
+        PID,
+        "item2",
+        ItemRecord(
+            name="Mirror",
+            category="set dressing",
+            status=ItemStatus.RESEARCHING,
+            next_action_due_at=T0,
+        ),
+    )
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.items_researched == 1

@@ -46,6 +46,7 @@ from orchestrator.clock import SimClock, initial_state
 from orchestrator.gmail import GmailTransport, build_credentials, token_store_for
 from orchestrator.logs import configure_logging
 from orchestrator.mail import InMemoryMailbox, MailTransport
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import ItemRecord, ItemStatus, ProjectRecord
 from orchestrator.repository import FirestoreRepository
 from orchestrator.settings import BrainBackend, MailBackend, Settings
@@ -144,7 +145,7 @@ def build_services(settings: Settings | None = None) -> Services:
         clock=clock,
         brain=brain,
         mail=mail,
-        loop=TickLoop(repo, clock, brain, mail),
+        loop=TickLoop(repo, clock, brain, SingleMailbox(mail)),
     )
 
 
