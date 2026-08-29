@@ -29,7 +29,9 @@ from orchestrator.gmail import (
     FileTokenStore,
     GmailTransport,
     SecretManagerTokenStore,
+    Sender,
     client_credentials,
+    producer_token_store,
     token_store_for,
 )
 from orchestrator.mail import InMemoryMailbox, MailTransport
@@ -151,10 +153,15 @@ class _Threads:
 class _Users:
     _messages: _Messages
     _threads: _Threads
+    _fake: FakeGmail
 
     def __init__(self, fake: FakeGmail) -> None:
         self._messages = _Messages(fake)
         self._threads = _Threads(fake)
+        self._fake = fake
+
+    def getProfile(self, *, userId: str) -> _Executable:  # noqa: N802, N803
+        return _Executable({"emailAddress": self._fake.profile_email})
 
     def messages(self) -> _Messages:
         return self._messages
@@ -172,6 +179,7 @@ class FakeGmail:
     modified: list[tuple[str, dict[str, Any]]]
     queries: list[str]
     spam_trash_included: list[bool]
+    profile_email: str
     _users: _Users
 
     def __init__(self) -> None:
@@ -180,6 +188,7 @@ class FakeGmail:
         self.modified = []
         self.queries = []
         self.spam_trash_included = []
+        self.profile_email = "connected@example.test"
         self._users = _Users(self)
 
     def users(self) -> _Users:
@@ -858,3 +867,85 @@ def test_the_loop_cannot_rearm_anything() -> None:
     """
     assert not hasattr(MailTransport, "restore_unread")
     assert not hasattr(InMemoryMailbox, "restore_unread")
+
+
+# --------------------------------------------------------------------------- #
+# Whose address this is
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_from_line_is_the_senders_not_the_settings() -> None:
+    """A producer's own Gmail, once they connect one.
+
+    Gmail rewrites a From header that does not match the authenticated
+    account, so a transport built with the wrong identity does not fail — it
+    silently sends as somebody else, and the panel then tells the producer
+    they are negotiating from an address they are not.
+    """
+    fake = FakeGmail()
+    transport = GmailTransport(
+        fake, SETTINGS, Sender(email="hana@example.test", display_name="Hana")
+    )
+
+    _ = await transport.send(to="seller@example.test", subject="Hi", body="Hello")
+
+    mime = _sent_mime(fake)
+    assert mime["From"] == "Hana <hana@example.test>"
+    assert "example.test" in str(mime["Message-ID"])
+
+
+async def test_without_a_sender_it_falls_back_to_the_configured_identity() -> None:
+    """What the single shared mailbox used, and what the smoke check runs on."""
+    transport, fake = _transport()
+
+    _ = await transport.send(to="seller@example.test", subject="Hi", body="Hello")
+
+    assert _sent_mime(fake)["From"] == "Greenlit <agent@cinema.test>"
+
+
+async def test_the_connected_address_is_asked_for_not_assumed() -> None:
+    transport, fake = _transport()
+    fake.profile_email = "someone-else@gmail.test"
+
+    assert await transport.connected_address() == "someone-else@gmail.test"
+
+
+def test_each_producer_gets_their_own_secret() -> None:
+    """One secret per producer, never one shared secret holding a map.
+
+    A map needs one binding instead of many, which is tempting — but Secret
+    Manager has no compare-and-swap, so two producers connecting at the same
+    moment would read the same version and one would overwrite the other's
+    token. That loss is silent, and shows up days later as negotiations that
+    never moved.
+    """
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        token_backend=TokenBackend.SECRET_MANAGER,
+        gcp_project="proj",
+    )
+
+    one = producer_token_store(settings, "uid-one")
+    two = producer_token_store(settings, "uid-two")
+
+    assert isinstance(one, SecretManagerTokenStore)
+    assert isinstance(two, SecretManagerTokenStore)
+    assert one._secret != two._secret  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_producer_token_falls_back_to_a_file_off_cloud(tmp_path: Path) -> None:
+    """So the flow can be exercised on a laptop with no GCP project."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        token_backend=TokenBackend.FILE,
+        token_dir=tmp_path,
+    )
+
+    store = producer_token_store(settings, "uid-one")
+
+    assert isinstance(store, FileTokenStore)
+    store.write("refresh-me")
+    assert store.read() == "refresh-me"
+    assert not (tmp_path / "gmail_refresh_token.json").exists(), (
+        "must not collide with the single shared agent token"
+    )

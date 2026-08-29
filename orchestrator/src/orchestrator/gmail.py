@@ -129,6 +129,26 @@ def token_store_for(settings: Settings) -> TokenStore:
     return FileTokenStore(settings.refresh_token_path)
 
 
+def producer_token_store(settings: Settings, uid: str) -> TokenStore:
+    """Where one producer's refresh token lives.
+
+    One secret per producer rather than one shared secret holding a map of
+    them. A map would need only a single Secret Manager binding, which is
+    tempting, but Secret Manager has no compare-and-swap: two producers
+    connecting at once would read the same version and one would overwrite the
+    other's token. Losing a credential that way is silent, and the producer who
+    lost it finds out days later when their negotiations have not moved.
+
+    Falls back to the file store when that is the configured backend, so a
+    laptop with no GCP project can still exercise the flow.
+    """
+    if settings.token_backend is TokenBackend.SECRET_MANAGER:
+        return SecretManagerTokenStore(
+            settings.gcp_project, f"{settings.refresh_token_secret}-{uid}"
+        )
+    return FileTokenStore(settings.token_dir / f"gmail_refresh_token_{uid}.json")
+
+
 def client_credentials(settings: Settings) -> tuple[str, str]:
     """The OAuth client id and secret, from configuration or the client file.
 
@@ -251,22 +271,53 @@ class ThreadMessage:
         return "SENT" in self.labels
 
 
+@dataclass(frozen=True)
+class Sender:
+    """Whose name and address go in the From line.
+
+    Was a pair of global settings, when there was one mailbox. Now that a
+    producer connects their own Gmail it belongs to the transport, because the
+    address a supplier sees has to be the address that actually sent the
+    message — Gmail rewrites a From header that does not match the
+    authenticated account, so getting this wrong does not fail loudly, it just
+    quietly sends as somebody else.
+    """
+
+    email: str
+    display_name: str
+
+    @property
+    def header(self) -> str:
+        return f"{self.display_name} <{self.email}>"
+
+
 class GmailTransport:
     """Send and poll one mailbox over the Gmail API."""
 
     _service: Any
     _settings: Settings
+    _sender: Sender
 
-    def __init__(self, service: Any, settings: Settings) -> None:
+    def __init__(
+        self, service: Any, settings: Settings, sender: Sender | None = None
+    ) -> None:
         self._service = service
         self._settings = settings
+        # Falls back to the configured identity, which is what the single
+        # shared mailbox used and what the smoke check still runs on.
+        self._sender = sender or Sender(
+            email=settings.agent_email, display_name=settings.agent_display_name
+        )
 
     @classmethod
     def from_credentials(
-        cls, credentials: Credentials, settings: Settings
+        cls,
+        credentials: Credentials,
+        settings: Settings,
+        sender: Sender | None = None,
     ) -> GmailTransport:
         service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
-        return cls(service, settings)
+        return cls(service, settings, sender)
 
     async def send(
         self,
@@ -287,11 +338,9 @@ class GmailTransport:
         """
         message = EmailMessage()
         message["To"] = to
-        message["From"] = (
-            f"{self._settings.agent_display_name} <{self._settings.agent_email}>"
-        )
+        message["From"] = self._sender.header
         message["Subject"] = subject
-        rfc822_id = make_msgid(domain=self._settings.agent_email.split("@")[-1])
+        rfc822_id = make_msgid(domain=self._sender.email.split("@")[-1])
         message["Message-ID"] = rfc822_id
         if in_reply_to:
             message["In-Reply-To"] = in_reply_to
@@ -398,6 +447,20 @@ class GmailTransport:
             )
             for message in thread.get("messages") or []
         ]
+
+    async def connected_address(self) -> str:
+        """Which mailbox this credential actually opens.
+
+        Asked at connect time rather than assumed from the Firebase account: a
+        producer may well sign in with one Google account and authorise a
+        different one, and it is this address that ends up in a supplier's From
+        line. Guessing it would mean the panel telling a producer they are
+        sending as an address they are not.
+        """
+        profile = await asyncio.to_thread(
+            lambda: self._service.users().getProfile(userId="me").execute()
+        )
+        return str(profile.get("emailAddress") or "")
 
     async def restore_unread(self, thread_id: str) -> list[str]:
         """Put UNREAD back on the replies in one thread. Returns what changed.
