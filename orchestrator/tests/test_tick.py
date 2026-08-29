@@ -604,14 +604,16 @@ async def test_mail_for_an_unknown_thread_is_never_even_fetched(
 class _ForgetfulRepository(FirestoreRepository):
     """Names a thread as live, then cannot find it a moment later.
 
-    The race the transport cannot close: ``live_thread_ids`` reads the whole
-    set at the top of a tick, and a negotiation can be removed between then and
-    ``find_by_thread``. Rare, and the only way the unmatched branch is now
-    reachable at all — which is exactly why it needs holding down.
+    The race the transport cannot close: ``live_thread_ids`` reads the project's
+    whole set at the top of a tick, and a negotiation can be removed between
+    then and ``find_by_thread``. Rare, and the only way the unmatched branch is
+    now reachable at all — which is exactly why it needs holding down.
     """
 
     @override
-    async def find_by_thread(self, thread_id: str) -> DueNegotiation | None:
+    async def find_by_thread(
+        self, project_id: str, thread_id: str
+    ) -> DueNegotiation | None:
         return None
 
 

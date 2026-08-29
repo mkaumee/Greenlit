@@ -411,8 +411,8 @@ class FirestoreRepository:
             )
         return due
 
-    async def live_thread_ids(self) -> frozenset[str]:
-        """Every Gmail thread this system is currently negotiating in.
+    async def live_thread_ids(self, project_id: str) -> frozenset[str]:
+        """Every Gmail thread this project is currently negotiating in.
 
         The transport is given this so it only ever reads — and only ever marks
         read — mail in conversations we started. Without it, polling an inbox
@@ -420,12 +420,20 @@ class FirestoreRepository:
         irreversible and, on a mailbox that is also somebody's personal one,
         destroys a hundred messages' worth of unread state.
 
-        A collection-group query, like ``due_negotiations``: threads belong to
-        the system rather than to any one project, because an inbound message
-        arrives knowing nothing about which project it concerns.
+        Scoped to one project, not to the whole system. It was a
+        collection-group query while every project shared one mailbox, and that
+        was right then. Now that a producer connects their own, the set has to
+        match the mailbox being polled: handing project A's tick the thread ids
+        of project B would have A's mailbox consume B's replies whenever the
+        same person owns both — filed correctly, by the wrong project's tick,
+        which is the kind of wrong that never shows up as a bug and quietly
+        makes the ownership rule untrue.
         """
-        query = self._db.collection_group(NEGOTIATIONS).where(
-            filter=FieldFilter("gmail_thread_id", "!=", "")
+        query = (
+            self._db.collection(PROJECTS)
+            .document(project_id)
+            .collection(NEGOTIATIONS)
+            .where(filter=FieldFilter("gmail_thread_id", "!=", ""))
         )
         found: set[str] = set()
         async for snapshot in query.stream():
@@ -437,27 +445,33 @@ class FirestoreRepository:
                 found.add(thread)
         return frozenset(found)
 
-    async def find_by_thread(self, thread_id: str) -> DueNegotiation | None:
+    async def find_by_thread(
+        self, project_id: str, thread_id: str
+    ) -> DueNegotiation | None:
         """Locate a negotiation from an inbound Gmail thread ID.
 
         Inbound mail is routed by thread ID and never by subject line, because
         suppliers rewrite subjects and a subject match would file a reply
         against the wrong negotiation.
+
+        Scoped to the project whose mailbox the message was read from, for the
+        same reason ``live_thread_ids`` is.
         """
         if not thread_id:
             return None
         query = (
-            self._db.collection_group(NEGOTIATIONS)
+            self._db.collection(PROJECTS)
+            .document(project_id)
+            .collection(NEGOTIATIONS)
             .where(filter=FieldFilter("gmail_thread_id", "==", thread_id))
             .limit(1)
         )
         async for snapshot in query.stream():
             data = snapshot.to_dict()
-            project_ref = snapshot.reference.parent.parent
-            if data is None or project_ref is None:
+            if data is None:
                 continue
             return DueNegotiation(
-                project_id=project_ref.id,
+                project_id=project_id,
                 negotiation_id=snapshot.id,
                 record=NegotiationRecord.model_validate(data),
                 update_time=snapshot.update_time,

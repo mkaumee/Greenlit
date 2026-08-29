@@ -184,9 +184,9 @@ class TickLoop:
             # Name what we own before reading the mailbox. The transport only
             # touches — and only marks read — mail in these conversations, so
             # an agent sharing a mailbox with a human cannot consume their post.
-            mine = await self._repo.live_thread_ids()
+            mine = await self._repo.live_thread_ids(project_id)
             for raw in await mail.poll(threads=mine):
-                await self._file_reply(raw, now, report)
+                await self._file_reply(project_id, raw, now, report)
 
         # Items first, so a negotiation opened by this pass gets its opening
         # email in the same pass rather than waiting a minute for the next one.
@@ -225,10 +225,10 @@ class TickLoop:
     # ------------------------------------------------------------------ #
 
     async def _file_reply(
-        self, raw: RawInbound, now: datetime, report: TickReport
+        self, project_id: str, raw: RawInbound, now: datetime, report: TickReport
     ) -> None:
         """Route one inbound message to its negotiation and read it."""
-        target = await self._repo.find_by_thread(raw.thread_id)
+        target = await self._repo.find_by_thread(project_id, raw.thread_id)
         if target is None:
             # Someone emailed the agent outside any negotiation we started, or
             # a thread was deleted. Not an error, and deliberately not an

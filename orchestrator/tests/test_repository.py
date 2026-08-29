@@ -363,7 +363,7 @@ async def test_inbound_mail_is_routed_by_thread_id(firestore: AsyncClient) -> No
         PID, "neg2", _negotiation(item_id="item2", thread="thread-xyz")
     )
 
-    found = await repo.find_by_thread("thread-xyz")
+    found = await repo.find_by_thread(PID, "thread-xyz")
 
     assert found is not None
     assert found.negotiation_id == "neg2"
@@ -377,8 +377,8 @@ async def test_an_unknown_thread_finds_nothing_rather_than_guessing(
     await repo.create_project(PID, _project())
     await repo.save_negotiation(PID, "neg1", _negotiation(thread="thread-abc"))
 
-    assert await repo.find_by_thread("thread-nope") is None
-    assert await repo.find_by_thread("") is None
+    assert await repo.find_by_thread(PID, "thread-nope") is None
+    assert await repo.find_by_thread(PID, "") is None
 
 
 async def test_replaying_a_message_after_a_killed_tick_does_not_duplicate_it(
@@ -498,3 +498,26 @@ async def test_items_and_suppliers_round_trip(firestore: AsyncClient) -> None:
 async def test_a_missing_project_has_no_clock_to_read(firestore: AsyncClient) -> None:
     with pytest.raises(KeyError):
         _ = await FirestoreRepository(firestore).read("no-such-project")
+
+
+async def test_one_projects_threads_are_not_another_projects(
+    firestore: AsyncClient,
+) -> None:
+    """Each producer connects their own Gmail, so the thread ids handed to a
+    mailbox must be that project's alone.
+
+    Cross the streams and project A's tick polls A's mailbox for B's threads.
+    When the same person owns both — the normal case — A would consume B's
+    replies and file them, correctly, from the wrong project's tick. Nothing
+    would look broken; the ownership rule would simply stop being true.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.create_project("other-production", _project())
+    await repo.save_negotiation(PID, "neg1", _negotiation(thread="thread-ours"))
+    await repo.save_negotiation(
+        "other-production", "neg1", _negotiation(thread="thread-theirs")
+    )
+
+    assert await repo.live_thread_ids(PID) == frozenset({"thread-ours"})
+    assert await repo.find_by_thread(PID, "thread-theirs") is None
