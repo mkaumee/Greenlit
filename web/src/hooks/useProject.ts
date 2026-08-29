@@ -17,11 +17,13 @@ import {
   onSnapshot,
   orderBy,
   query,
+  where,
   type Timestamp,
 } from "firebase/firestore";
+import { onAuthStateChanged } from "firebase/auth";
 import { useEffect, useState } from "react";
 
-import { db } from "@/firebase";
+import { auth, db } from "@/firebase";
 
 export interface Money {
   amount: number;
@@ -141,22 +143,41 @@ export const useNegotiations = (projectId: string) =>
 export const useSuppliers = (projectId: string) =>
   useCollection<Supplier>(projectId, "suppliers");
 
-/** Every project. Small enough to list them all. */
+/**
+ * The productions this account owns. Nobody else's.
+ *
+ * This listed every project until somebody signed in with a second Google
+ * account and was shown a stranger's props, suppliers, quotes and negotiation
+ * transcripts. The query asked for all of them and `firestore.rules` said
+ * `isSignedIn()`, which is true of every Google account there is.
+ *
+ * The filter and the rule are both needed and do different jobs: the filter is
+ * what this screen asks for, the rule is what makes it true for anything else
+ * that opens the collection. Neither alone is the boundary.
+ *
+ * Returns nothing while signed out rather than erroring — that is a state the
+ * shell renders, not a failure.
+ */
 export function useProjects(): { ids: string[]; error: string } {
   const [state, setState] = useState<{ ids: string[]; error: string }>({
     ids: [],
     error: "",
   });
 
-  useEffect(
-    () =>
-      onSnapshot(
-        collection(db, "projects"),
+  useEffect(() => {
+    const stop = onAuthStateChanged(auth, (user) => {
+      if (user === null) {
+        setState({ ids: [], error: "" });
+        return;
+      }
+      return onSnapshot(
+        query(collection(db, "projects"), where("owner_uid", "==", user.uid)),
         (snap) => setState({ ids: snap.docs.map((d) => d.id), error: "" }),
         (cause) => setState({ ids: [], error: cause.message }),
-      ),
-    [],
-  );
+      );
+    });
+    return stop;
+  }, []);
 
   return state;
 }

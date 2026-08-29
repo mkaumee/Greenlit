@@ -59,6 +59,13 @@ EMULATOR_HOST = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
 PROJECT_ID = os.environ.get("FIRESTORE_PROJECT_ID", "demo-cinema")
 ORDERS_DATABASE = "orders"
 PID = "e2e-project"
+E2E_OWNER_UID = "e2e-producer"
+"""Who owns the seeded project.
+
+Not cosmetic: `firestore.rules` makes a project readable only by its owner, so
+an unowned one is invisible to the panel. Fixed rather than random so that
+`make web-dev` can sign in against the Auth emulator and actually see this run's
+output."""
 
 SIM_START = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 REAL_ANCHOR = datetime(2026, 8, 12, 14, 0, tzinfo=UTC)
@@ -165,6 +172,10 @@ async def seed_from_screenplay(api: httpx.AsyncClient) -> int:
             "project_id": PID,
             "title": "Nasi Lemak Nights",
             "sim_start": SIM_START.isoformat(),
+            # So `make web-dev` against the emulator has something visible.
+            # The rules match projects on owner_uid, and the Auth emulator
+            # hands every sign-in a uid — this is the one it gives.
+            "owner_uid": E2E_OWNER_UID,
         },
     )
     if created.status_code != 201:

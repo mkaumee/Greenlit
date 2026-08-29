@@ -144,24 +144,12 @@ export function useNegotiations(projectId: string): Feed {
   return feed;
 }
 
-/** Every project, live. Small enough that the panel just lists them all. */
-export function useProjects(): { ids: string[]; error: string } {
-  const [state, setState] = useState<{ ids: string[]; error: string }>({
-    ids: [],
-    error: "",
-  });
-
-  useEffect(() => {
-    return onSnapshot(
-      collection(db, "projects"),
-      (snap) => {
-        setState({ ids: snap.docs.map((d) => d.id), error: "" });
-      },
-      (cause) => {
-        setState({ ids: [], error: cause.message });
-      },
-    );
-  }, []);
-
-  return state;
-}
+/**
+ * The productions this account owns.
+ *
+ * One definition, in `hooks/useProject.ts`. There were two, and the copy here
+ * still listed every project after the other was scoped to its owner — which
+ * is exactly how a fixed leak comes back: the panel looked right and the debug
+ * screen went on showing strangers' productions.
+ */
+export { useProjects } from "@/hooks/useProject";

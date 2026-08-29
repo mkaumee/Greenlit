@@ -48,9 +48,11 @@ import {
   doc,
   getDoc,
   getDocs,
+  query,
   setDoc,
   setLogLevel,
   updateDoc,
+  where,
   type Firestore,
 } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
@@ -393,8 +395,15 @@ describe("what a browser may query", () => {
   });
 
   beforeEach(async () => {
-    await seed(main, "projects/projA", { title: "Kopitiam" });
+    await seed(main, "projects/projA", {
+      title: "Kopitiam",
+      owner_uid: PRODUCER,
+    });
     await seed(main, "projects/projA/negotiations/neg1", record("SENT"));
+    await seed(main, "projects/projB", {
+      title: "Someone Else's Film",
+      owner_uid: "a-different-producer",
+    });
     await seed(main, "projects/projB/negotiations/neg2", record("SENT"));
     await seed(main, "projects/projA/negotiations/neg1/messages/m1", {
       direction: "inbound",
@@ -402,8 +411,58 @@ describe("what a browser may query", () => {
     });
   });
 
-  it("lists the projects, so the panel can offer a choice", async () => {
-    await assertSucceeds(getDocs(collection(asProducer(main), "projects")));
+  it("lists the projects this account owns", async () => {
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(asProducer(main), "projects"),
+          where("owner_uid", "==", PRODUCER),
+        ),
+      ),
+    );
+  });
+
+  it("refuses a query for every project", async () => {
+    // How the leak was found: signing in with a second Google account and
+    // being shown a stranger's production. The panel asked for all projects
+    // and the rule said isSignedIn(), which every Google account satisfies.
+    //
+    // Refused outright rather than quietly returning the owned subset —
+    // a query that asks for more than it may have should fail, not be
+    // trimmed, or the next screen to forget the filter leaks again.
+    await assertFails(getDocs(collection(asProducer(main), "projects")));
+  });
+
+  it("refuses one producer another producer's project", async () => {
+    await assertFails(getDoc(doc(asProducer(main), "projects/projB")));
+  });
+
+  it("refuses the props, suppliers and quotes under it", async () => {
+    // The part that actually matters. A rival production's breakdown is its
+    // shopping list, its suppliers are its contacts, and its negotiations are
+    // what it is willing to pay.
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/items")),
+    );
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/suppliers")),
+    );
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/negotiations")),
+    );
+  });
+
+  it("refuses another producer's correspondence", async () => {
+    await seed(main, "projects/projB/negotiations/neg2/messages/m1", {
+      direction: "inbound",
+      body: "We can do RM600.",
+    });
+
+    await assertFails(
+      getDocs(
+        collection(asProducer(main), "projects/projB/negotiations/neg2/messages"),
+      ),
+    );
   });
 
   it("lists one project's negotiations", async () => {
@@ -445,6 +504,7 @@ describe("what a browser may query", () => {
 
   it("still shuts an unauthenticated caller out of every one of those", async () => {
     await assertFails(getDocs(collection(asStranger(main), "projects")));
+    await assertFails(getDoc(doc(asStranger(main), "projects/projA")));
     await assertFails(
       getDocs(collection(asStranger(main), "projects/projA/negotiations")),
     );

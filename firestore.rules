@@ -25,6 +25,23 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.role == 'producer';
     }
 
+    // Whose production this is.
+    //
+    // Found by signing in with a second Google account and being shown
+    // somebody else's props, suppliers, quotes and negotiation transcripts.
+    // Every rule below said `isSignedIn()`, which was true of every Google
+    // account on earth — so the panel was not showing hard-coded demo data, it
+    // was showing a real production to a stranger.
+    //
+    // A subcollection cannot see its parent's fields, so ownership costs a
+    // document read per evaluation. That is the price of the boundary being
+    // real rather than being a filter in a query somebody can edit.
+    function ownsProject(projectId) {
+      return isSignedIn()
+             && get(/databases/$(database)/documents/projects/$(projectId))
+                  .data.owner_uid == request.auth.uid;
+    }
+
     // ---------------------------------------------------------------------
     // Purchase orders are NOT here
     // ---------------------------------------------------------------------
@@ -75,21 +92,25 @@ service cloud.firestore {
     // items, suppliers, negotiations and messages freely — that is its job, and
     // none of it moves money.
     match /projects/{projectId} {
-      allow read: if isSignedIn();
+      // Owner only, on the document itself. A list query is allowed when it
+      // filters on owner_uid, which is what useProjects() does — a query that
+      // asked for every project is refused outright rather than silently
+      // returning a subset.
+      allow read: if isSignedIn() && resource.data.owner_uid == request.auth.uid;
       allow write: if isSignedIn();
 
       match /items/{itemId} {
-        allow read: if isSignedIn();
+        allow read: if ownsProject(projectId);
         allow write: if isSignedIn();
       }
 
       match /suppliers/{supplierId} {
-        allow read: if isSignedIn();
+        allow read: if ownsProject(projectId);
         allow write: if isSignedIn();
       }
 
       match /negotiations/{negotiationId} {
-        allow read: if isSignedIn();
+        allow read: if ownsProject(projectId);
 
         // The agent may drive a negotiation anywhere except into ORDERED.
         // ORDERED means a purchase order exists, and only a producer can have
@@ -102,7 +123,7 @@ service cloud.firestore {
         allow delete: if false;
 
         match /messages/{messageId} {
-          allow read: if isSignedIn();
+          allow read: if ownsProject(projectId);
           // Correspondence is append-only. An agent that could rewrite what a
           // supplier said would make the timeline worthless as evidence.
           allow create: if isSignedIn();

@@ -261,6 +261,15 @@ async def health(request: Request) -> Health:
 class CreateProject(BaseModel):
     project_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,60}$")
     title: str
+    owner_uid: str = ""
+    """Whose production this is, and whose mailbox it negotiates from.
+
+    Empty means nobody owns it, which makes it invisible to every browser —
+    `firestore.rules` matches on this field. That is the right default: a
+    project created without an owner should be unreachable rather than
+    readable by whoever signs in next, which is precisely the bug this field
+    exists to close.
+    """
     budget_baseline: Money | None = None
     sim_start: datetime | None = None
     """Where simulated time starts. Defaults to real now, which is what live
@@ -326,6 +335,7 @@ async def create_project(request: Request, body: CreateProject) -> ProjectCreate
                 clock=initial_state(sim_start, real_now),
                 budget_baseline=body.budget_baseline,
                 created_at=sim_start,
+                owner_uid=body.owner_uid,
             ),
         )
     except AlreadyExists as exc:

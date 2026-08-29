@@ -347,3 +347,37 @@ def test_the_real_brain_is_built_with_the_configured_model(
 
     assert isinstance(brain, FakeBrain)
     assert seen["model"] == "gemini-3.7-pro", "the configured model must reach it"
+
+
+async def test_a_project_records_who_owns_it(
+    api: httpx.AsyncClient, firestore: AsyncClient
+) -> None:
+    """firestore.rules matches on this field, so it is what makes a production
+    visible to its producer and to nobody else."""
+    created = await api.post(
+        "/projects",
+        json={"project_id": "owned", "title": "Kopitiam", "owner_uid": "uid-1"},
+    )
+
+    assert created.status_code == 201
+    record = await FirestoreRepository(firestore).get_project("owned")
+    assert record is not None
+    assert record.owner_uid == "uid-1"
+
+
+async def test_a_project_with_no_owner_is_created_unreachable(
+    api: httpx.AsyncClient, firestore: AsyncClient
+) -> None:
+    """Not an error — the safe default.
+
+    An unowned project is invisible to every browser rather than readable by
+    whoever signs in next, which is the exact bug owner_uid exists to close.
+    """
+    created = await api.post(
+        "/projects", json={"project_id": "orphan", "title": "Nobody's"}
+    )
+
+    assert created.status_code == 201
+    record = await FirestoreRepository(firestore).get_project("orphan")
+    assert record is not None
+    assert record.owner_uid == ""
