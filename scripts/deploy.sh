@@ -500,6 +500,17 @@ $(printf '\033[1mNow verify it\033[0m')
 $(printf '\033[1mThen\033[0m')
 
 $NEXT_MAIL
+$(printf '\033[1mBefore a producer can connect their Gmail\033[0m')
+
+  Register this on the Web OAuth client — it cannot be scripted, gcloud does
+  not expose OAuth client redirect URIs:
+
+    ${APPROVALS_URL}/mailbox/callback
+
+  Full instructions, and the two things people get wrong on that screen:
+
+    PROJECT_ID=$PROJECT_ID ./scripts/oauth_redirect_uri.sh
+
   Leave it alone overnight. Come back to a negotiation that advanced with
   nobody touching it, and one JSON line per minute:
 

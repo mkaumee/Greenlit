@@ -23,7 +23,7 @@ REGION ?= us-central1
 APPROVALS_SERVICE ?= cinema-approvals
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
-.PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
+.PHONY: gcp-setup deploy-rules deploy verify-deploy redirect-uri require-firebase require-gcloud require-project
 .PHONY: web-dev web-build deploy-web seed gmail-smoke
 
 help:
@@ -121,6 +121,11 @@ deploy: require-gcloud require-project ## Deploy both Cloud Run services and the
 
 verify-deploy: require-gcloud require-project ## Check a deployment — read-only, and the real definition of done
 	PROJECT_ID=$(PROJECT_ID) ./scripts/verify_deploy.sh
+
+# Needed before any producer can connect a mailbox, and needed again whenever
+# somebody asks "what was that URL". Read-only, so it costs nothing to re-run.
+redirect-uri: require-gcloud require-project ## Print the OAuth redirect URI to register, and where
+	PROJECT_ID=$(PROJECT_ID) ./scripts/oauth_redirect_uri.sh
 
 # Keyed on the lockfile, not on any binary.
 #
