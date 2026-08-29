@@ -28,6 +28,8 @@ from orchestrator.records import (
     ITEM_TERMINAL_STATUSES,
     ItemRecord,
     ItemStatus,
+    MailboxRecord,
+    MailboxStatus,
     MessageRecord,
     NegotiationRecord,
     ProjectRecord,
@@ -44,6 +46,8 @@ SUPPLIERS = "suppliers"
 NEGOTIATIONS = "negotiations"
 MESSAGES = "messages"
 PURCHASE_ORDERS = "purchase_orders"
+MAILBOXES = "mailboxes"
+OAUTH_STATES = "oauth_states"
 
 
 class DuplicateOrderError(RuntimeError):
@@ -220,6 +224,36 @@ class FirestoreRepository:
         snapshot = await self._project_ref(project_id).get()
         data = snapshot.to_dict()
         return None if data is None else ProjectRecord.model_validate(data)
+
+    # ------------------------------------------------------------------ #
+    # Mailboxes
+    # ------------------------------------------------------------------ #
+    #
+    # Metadata only. The refresh token is in Secret Manager — see
+    # MailboxRecord for why a credential does not go in here.
+
+    async def get_mailbox(self, uid: str) -> MailboxRecord | None:
+        snapshot = await self._db.collection(MAILBOXES).document(uid).get()
+        data = snapshot.to_dict()
+        return None if data is None else MailboxRecord.model_validate(data)
+
+    async def save_mailbox(self, uid: str, rec: MailboxRecord) -> None:
+        _ = await self._db.collection(MAILBOXES).document(uid).set(rec.to_firestore())
+
+    async def mark_mailbox(
+        self, uid: str, status: MailboxStatus, now: datetime
+    ) -> None:
+        """Record that a mailbox stopped working, without touching the rest.
+
+        Called from the tick when a refresh is refused. A merge rather than a
+        write of the whole record, because the tick is not the authority on
+        which address is connected — only on whether it still works.
+        """
+        _ = await (
+            self._db.collection(MAILBOXES)
+            .document(uid)
+            .set({"status": status.value, "updated_at": now}, merge=True)
+        )
 
     # ------------------------------------------------------------------ #
     # Items and suppliers

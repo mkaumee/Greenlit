@@ -450,3 +450,63 @@ describe("what a browser may query", () => {
     );
   });
 });
+
+// --------------------------------------------------------------------------
+// mailboxes — whose Gmail the agent negotiates from
+// --------------------------------------------------------------------------
+
+describe("mailboxes", () => {
+  const mailbox = (email: string) => ({
+    email,
+    display_name: "A Producer",
+    status: "CONNECTED",
+    connected_at: new Date("2026-03-01T09:00:00Z"),
+    updated_at: new Date("2026-03-01T09:00:00Z"),
+  });
+
+  it("lets a producer read their own", async () => {
+    await seed(main, `mailboxes/${PRODUCER}`, mailbox("me@example.test"));
+
+    await assertSucceeds(
+      getDoc(doc(asProducer(main), `mailboxes/${PRODUCER}`)),
+    );
+  });
+
+  it("refuses to show one producer another's mailbox", async () => {
+    // Which address a rival production negotiates from is not a browser's
+    // business, and the document is keyed by uid precisely so the rule can
+    // say that in one line.
+    await seed(main, "mailboxes/someone-else", mailbox("them@example.test"));
+
+    await assertFails(
+      getDoc(doc(asProducer(main), "mailboxes/someone-else")),
+    );
+  });
+
+  it("refuses a browser writing its own mailbox, claim or no claim", async () => {
+    // The document records a consent that happened between a person and
+    // Google. A browser that could edit it could mark a dead mailbox healthy
+    // and strand every negotiation behind it — silently, which is the only
+    // way that failure ever shows up.
+    await assertFails(
+      setDoc(doc(asProducer(main), `mailboxes/${PRODUCER}`), mailbox("me@x.test")),
+    );
+  });
+
+  it("refuses an unauthenticated reader outright", async () => {
+    await seed(main, `mailboxes/${PRODUCER}`, mailbox("me@example.test"));
+
+    await assertFails(getDoc(doc(asStranger(main), `mailboxes/${PRODUCER}`)));
+  });
+
+  it("keeps the OAuth state binding away from browsers entirely", async () => {
+    // Reading one is enough to finish somebody else's consent and attach
+    // their mailbox to your own account.
+    await seed(main, "oauth_states/abc123", { uid: PRODUCER });
+
+    await assertFails(getDoc(doc(asProducer(main), "oauth_states/abc123")));
+    await assertFails(
+      setDoc(doc(asProducer(main), "oauth_states/mine"), { uid: PRODUCER }),
+    );
+  });
+});

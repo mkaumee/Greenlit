@@ -22,6 +22,8 @@ from orchestrator.clock import ClockState, SimClock
 from orchestrator.records import (
     ItemRecord,
     ItemStatus,
+    MailboxRecord,
+    MailboxStatus,
     MessageRecord,
     NegotiationRecord,
     ProjectRecord,
@@ -521,3 +523,51 @@ async def test_one_projects_threads_are_not_another_projects(
 
     assert await repo.live_thread_ids(PID) == frozenset({"thread-ours"})
     assert await repo.find_by_thread(PID, "thread-theirs") is None
+
+
+# --------------------------------------------------------------------------- #
+# Mailboxes
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_mailbox_round_trips(firestore: AsyncClient) -> None:
+    repo = FirestoreRepository(firestore)
+
+    await repo.save_mailbox(
+        "uid-1",
+        MailboxRecord(
+            email="producer@example.test",
+            display_name="A Producer",
+            connected_at=T0,
+            updated_at=T0,
+        ),
+    )
+
+    found = await repo.get_mailbox("uid-1")
+    assert found is not None
+    assert found.email == "producer@example.test"
+    assert found.status is MailboxStatus.CONNECTED
+
+
+async def test_marking_a_mailbox_expired_keeps_the_address(
+    firestore: AsyncClient,
+) -> None:
+    """The tick knows the token stopped working. It does not know, and must not
+    overwrite, which address the producer connected."""
+    repo = FirestoreRepository(firestore)
+    await repo.save_mailbox(
+        "uid-1",
+        MailboxRecord(email="producer@example.test", connected_at=T0, updated_at=T0),
+    )
+
+    await repo.mark_mailbox("uid-1", MailboxStatus.EXPIRED, T0)
+
+    found = await repo.get_mailbox("uid-1")
+    assert found is not None
+    assert found.status is MailboxStatus.EXPIRED
+    assert found.email == "producer@example.test", "still the connected address"
+
+
+async def test_an_unconnected_producer_has_no_mailbox(firestore: AsyncClient) -> None:
+    repo = FirestoreRepository(firestore)
+    assert await repo.get_mailbox("never-connected") is None

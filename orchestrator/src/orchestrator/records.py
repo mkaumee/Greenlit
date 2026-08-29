@@ -89,6 +89,50 @@ ITEM_TERMINAL_STATUSES: frozenset[ItemStatus] = frozenset(
 )
 
 
+class MailboxStatus(StrEnum):
+    """Whether the agent can actually send as this producer."""
+
+    CONNECTED = "CONNECTED"
+
+    EXPIRED = "EXPIRED"
+    """The refresh token no longer works.
+
+    Not an edge case. A consent screen in Testing issues refresh tokens that
+    die after seven days, which is shorter than a negotiation — so this is the
+    state a working system spends part of every week in, and the panel has to
+    say so rather than letting a producer watch a project sit still.
+    """
+
+    REVOKED = "REVOKED"
+    """The producer disconnected, or withdrew access from their Google account."""
+
+
+class MailboxRecord(_Record):
+    """``mailboxes/{uid}`` — what the agent sends as, for one producer.
+
+    Metadata only. The refresh token itself lives in Secret Manager, because a
+    credential in Firestore is a credential the panel's rules are the only
+    thing standing in front of — and rules do not apply to server SDKs, which
+    is the same reasoning that put purchase orders in their own database.
+
+    Keyed by Firebase uid rather than by email: a producer may well connect a
+    different Gmail from the one they signed in with, and the address is a
+    property of the connection rather than of the person.
+    """
+
+    email: str
+    """The connected mailbox's own address, read from Gmail at connect time.
+
+    Not the Firebase account's email. It is what suppliers will see in their
+    From line, so it has to be the address that actually sent the message.
+    """
+
+    display_name: str = ""
+    status: MailboxStatus = MailboxStatus.CONNECTED
+    connected_at: datetime
+    updated_at: datetime
+
+
 class ProjectRecord(_Record):
     """``projects/{pid}``"""
 
@@ -96,6 +140,13 @@ class ProjectRecord(_Record):
     clock: ClockState
     budget_baseline: Money | None = None
     created_at: datetime
+    owner_uid: str = ""
+    """Whose mailbox this project negotiates from. A Firebase uid.
+
+    Defaulted rather than required so projects created before mailboxes
+    existed still load. Empty means nobody has claimed it, and the tick will
+    report it as having no mailbox rather than guessing at one.
+    """
 
 
 class ItemRecord(_Record):
