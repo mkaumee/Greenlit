@@ -56,6 +56,24 @@ URL=$(gcloud run services describe "$APPROVALS_SERVICE" \
   --region="$REGION" --project="$PROJECT_ID" \
   --format='value(status.url)' 2>/dev/null || true)
 
+# Cloud Run answers to two hostnames for the same service, and they are not
+# interchangeable to Google's OAuth check.
+#
+#   cinema-approvals-efbejege7q-uc.a.run.app     the older hash form
+#   cinema-approvals-678371873554.us-central1... the newer project-number form
+#
+# `gcloud run deploy` prints the second; `describe --format=status.url` returns
+# the first. Both route to the same container, so the difference is invisible
+# right up until OAuth, which compares redirect_uri as an exact string and
+# rejects a mismatch outright. Registering only the one you happened to copy is
+# a coin flip, so this prints both and says to register both.
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" \
+  --format='value(projectNumber)' 2>/dev/null || true)
+ALT=""
+if [[ -n "$PROJECT_NUMBER" ]]; then
+  ALT="https://${APPROVALS_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+fi
+
 if [[ -z "$URL" ]]; then
   cat >&2 <<EOF
   ✗ no $APPROVALS_SERVICE service in $PROJECT_ID ($REGION).
@@ -70,10 +88,24 @@ EOF
   exit 3
 fi
 
-printf '\n\033[1mRegister this redirect URI\033[0m\n\n'
+printf '\n\033[1mRegister these redirect URIs — all of them\033[0m\n\n'
 printf '    %s/mailbox/callback\n' "$URL"
+if [[ -n "$ALT" && "$ALT" != "$URL" ]]; then
+  printf '    %s/mailbox/callback\n' "$ALT"
+fi
 printf '\n  and, if you want to run the flow locally as well:\n\n'
 printf '    http://localhost:%s/mailbox/callback\n' "$LOCAL_PORT"
+
+if [[ -n "$ALT" && "$ALT" != "$URL" ]]; then
+  cat <<EOF
+
+  The first two are the same service. Cloud Run answers to both an older
+  hash hostname and a newer project-number one, \`gcloud run deploy\` prints
+  one while \`describe\` returns the other, and OAuth compares redirect_uri as
+  an exact string — so registering only the one you happened to copy is a coin
+  flip that lands on redirect_uri_mismatch half the time.
+EOF
+fi
 
 cat <<EOF
 

@@ -507,7 +507,9 @@ $(printf '\033[1mBefore a producer can connect their Gmail\033[0m')
 
     ${APPROVALS_URL}/mailbox/callback
 
-  Full instructions, and the two things people get wrong on that screen:
+  Cloud Run also answers to a second hostname for the same service, and OAuth
+  compares redirect_uri as an exact string. Register both. The script below
+  prints both, along with the two things people get wrong on that screen:
 
     PROJECT_ID=$PROJECT_ID ./scripts/oauth_redirect_uri.sh
 
