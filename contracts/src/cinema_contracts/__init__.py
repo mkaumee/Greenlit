@@ -15,18 +15,18 @@ from cinema_contracts.enums import (
     NegotiationState,
 )
 from cinema_contracts.models import (
-    BreakdownSource,
     ExtractedQuote,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     MessageSummary,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
     ReferenceBand,
     SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.money import Currency, CurrencyMismatchError, Money
@@ -35,7 +35,6 @@ from cinema_contracts.protocols import AgentBrain
 __all__ = [
     "TERMINAL_STATES",
     "AgentBrain",
-    "BreakdownSource",
     "ClockMode",
     "Currency",
     "CurrencyMismatchError",
@@ -43,7 +42,6 @@ __all__ = [
     "ExtractedQuote",
     "InboundMessage",
     "ItemBrief",
-    "ItemDraft",
     "ItemResearch",
     "MessageDirection",
     "MessageSummary",
@@ -52,8 +50,10 @@ __all__ = [
     "NegotiationContext",
     "NegotiationState",
     "NextMove",
+    "PropDraft",
     "QuoteExtraction",
     "ReferenceBand",
     "SceneMention",
+    "ScriptSource",
     "SupplierCandidate",
 ]

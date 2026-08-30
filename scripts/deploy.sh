@@ -221,6 +221,50 @@ EOF
 esac
 
 # ---------------------------------------------------------------------------
+say "Preflight — the brain"
+# ---------------------------------------------------------------------------
+#
+# Same shape as the mail check above, and for a worse failure. Role A's
+# researcher searches the web through Parallel; with no PARALLEL_API_KEY the
+# call raises, researcher.py catches it, and the model is told "web search
+# failed" — so it answers anyway, from memory. Out come reference price bands
+# and supplier URLs with nothing behind them, in a system whose whole claim is
+# that it keeps the URLs it got its numbers from.
+#
+# Nothing errors, nothing logs, and the negotiation emails look fine. Caught
+# here, and again at container startup, because it is not detectable later.
+
+case "$BRAIN_BACKEND" in
+  scripted)
+    printf '  \033[33m!\033[0m brain is the SCRIPTED fake — a regex and a word list.\n'
+    echo "    Fine for proving the loop runs. Not something to show anyone."
+    echo "    Turn on the real one:  BRAIN_BACKEND=main-agent"
+    ;;
+  main-agent)
+    if [[ -z "$PARALLEL_API_KEY" ]]; then
+      cat >&2 <<EOF
+  ✗ BRAIN_BACKEND=main-agent, but PARALLEL_API_KEY is not set.
+
+  Research would still answer — with no web search behind it — so its price
+  bands and supplier URLs would be invented rather than sourced. The service
+  refuses to start on this, so deploying it would produce a revision that
+  never goes ready.
+
+    PARALLEL_API_KEY=... BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
+
+  Nothing has been changed.
+EOF
+      exit 5
+    fi
+    ok "brain is main-agent ($GEMINI_MODEL), with a research key"
+    ;;
+  *)
+    echo "  ✗ BRAIN_BACKEND must be 'scripted' or 'main-agent', got '$BRAIN_BACKEND'" >&2
+    exit 2
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 say "APIs"
 # ---------------------------------------------------------------------------
 
@@ -364,6 +408,10 @@ TICK_ENV="${TICK_ENV}@CINEMA_GEMINI_MODEL=${GEMINI_MODEL}"
 TICK_ENV="${TICK_ENV}@CINEMA_TOKEN_BACKEND=secret-manager"
 TICK_ENV="${TICK_ENV}@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}"
 TICK_ENV="${TICK_ENV}@CINEMA_LOG_FORMAT=json"
+if [[ -n "$PARALLEL_API_KEY" ]]; then
+  # Not prefixed CINEMA_: the Parallel SDK reads this name itself.
+  TICK_ENV="${TICK_ENV}@PARALLEL_API_KEY=${PARALLEL_API_KEY}"
+fi
 if [[ -n "$OAUTH_CLIENT_ID" ]]; then
   TICK_ENV="${TICK_ENV}@CINEMA_OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}"
   TICK_ENV="${TICK_ENV}@CINEMA_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}"

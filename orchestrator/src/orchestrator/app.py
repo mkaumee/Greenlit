@@ -30,12 +30,13 @@ look like protection without being any.
 
 import importlib
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from cinema_contracts import AgentBrain, BreakdownSource, Money
+from cinema_contracts import AgentBrain, Money, ScriptSource
 from cinema_contracts.testing import ScriptedBrain
 from fastapi import FastAPI, HTTPException, Request
 from google.api_core.exceptions import AlreadyExists
@@ -91,11 +92,12 @@ def build_mail(settings: Settings) -> MailTransport:
 def build_brain(settings: Settings) -> AgentBrain:
     """The reasoning half. Role A's, or the fake standing in for it.
 
-    ``main-agent`` is Role A's package and does not exist on this branch, so
-    the default is Role B's deterministic fake. The import is deliberately
-    late and deliberately loud: selecting the real brain before that code is
-    merged fails at startup with an explanation, rather than silently falling
-    back to a keyword matcher that would look like it was working.
+    ``main-agent`` is merged; the default is still the deterministic fake,
+    because reasoning that emails real sellers should be switched on
+    deliberately. The import stays late and stays loud: an image built without
+    the ``COPY main-agent/`` lines fails at startup with an explanation rather
+    than silently falling back to a keyword matcher that would look like it was
+    working.
     """
     if settings.brain_backend is BrainBackend.MAIN_AGENT:
         # Resolved by name rather than imported statically: the package is on
@@ -107,9 +109,30 @@ def build_brain(settings: Settings) -> AgentBrain:
         except ImportError as exc:
             raise RuntimeError(
                 "CINEMA_BRAIN_BACKEND=main-agent, but main_agent is not "
-                "importable. That package is Role A's and lives on the role_a "
-                "branch; add it to the uv workspace members after merging."
+                "importable. It is a workspace member and a dependency of "
+                "orchestrator, so this almost certainly means an image built "
+                "without the `COPY main-agent/` lines in the Dockerfile."
             ) from exc
+
+        # Read from the environment rather than Settings because the name is
+        # the Parallel SDK's, not ours — `AsyncParallel()` infers it, and
+        # renaming it behind CINEMA_ would mean setting it twice.
+        #
+        # Checked at startup because the failure is otherwise invisible and
+        # expensive. Without a key the search call raises, research/researcher.py
+        # catches it, and the model is told "web search failed" — so it answers
+        # anyway, from memory. The result is a reference price band and supplier
+        # URLs with nothing behind them, in a system whose entire claim is that
+        # it keeps the URLs it got its numbers from. Nothing errors and nothing
+        # logs; a producer just gets invented evidence.
+        if not os.environ.get("PARALLEL_API_KEY"):
+            raise RuntimeError(
+                "CINEMA_BRAIN_BACKEND=main-agent, but PARALLEL_API_KEY is not "
+                "set. Item research would still answer — without any web "
+                "search behind it — so the reference bands and supplier URLs "
+                "it produced would be invented rather than sourced. Refusing "
+                "to start instead, because that failure is silent."
+            )
 
         brain: object = module.GeminiAgentBrain(model=settings.gemini_model)
         if not isinstance(brain, AgentBrain):
@@ -186,6 +209,15 @@ def services_of(request: Request) -> Services:
 class Health(BaseModel):
     status: str
     brain_backend: str
+    gemini_model: str
+    """Which model is reasoning. Empty on the scripted brain, which has none."""
+    research_web_search: bool
+    """Whether item research can actually search the web.
+
+    False means it still answers, from the model's memory, with price bands and
+    supplier URLs that were invented rather than sourced. Startup refuses this
+    combination, so a running service reporting false would mean the check was
+    removed — which is worth being able to see from outside."""
     mail_backend: str
     token_backend: str
     project: str
@@ -249,9 +281,12 @@ async def health(request: Request) -> Health:
     seller" and "is this the real brain or the fake" are.
     """
     settings = services_of(request).settings
+    real_brain = settings.brain_backend is BrainBackend.MAIN_AGENT
     return Health(
         status="ok",
         brain_backend=settings.brain_backend.value,
+        gemini_model=settings.gemini_model if real_brain else "",
+        research_web_search=real_brain and bool(os.environ.get("PARALLEL_API_KEY")),
         mail_backend=settings.mail_backend.value,
         token_backend=settings.token_backend.value,
         project=settings.gcp_project,
@@ -362,8 +397,8 @@ async def upload_script(
         raise HTTPException(status_code=404, detail=f"no project {project_id}")
 
     now = await services.clock.now(project_id)
-    drafts = await services.brain.parse_breakdown(
-        BreakdownSource(
+    drafts = await services.brain.extract_props(
+        ScriptSource(
             filename=body.filename,
             mime_type=body.mime_type,
             text_content=body.text_content,

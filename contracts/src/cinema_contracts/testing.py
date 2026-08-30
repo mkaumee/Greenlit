@@ -18,17 +18,17 @@ from decimal import Decimal
 
 from cinema_contracts.enums import EscalationReason, MessageDirection, MoveAction
 from cinema_contracts.models import (
-    BreakdownSource,
     ExtractedQuote,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
     ReferenceBand,
     SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.money import Money
@@ -108,7 +108,7 @@ class ScriptedBrain:
     def __init__(self, *, anchor: Money | None = None) -> None:
         self._anchor = anchor or Money(amount=1000)
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
         """Spot known nouns in action lines and quote the line they came from.
 
         A keyword scan against a fixed vocabulary — nothing like what the real
@@ -144,7 +144,7 @@ class ScriptedBrain:
                         destroyed.add(word)
 
         return [
-            ItemDraft(
+            PropDraft(
                 name=word,
                 category="prop",
                 qty=1,

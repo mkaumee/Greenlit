@@ -115,10 +115,11 @@ class Settings(BaseSettings):
     brain_backend: BrainBackend = BrainBackend.SCRIPTED
     """Which reasoning implementation to run.
 
-    Defaults to the fake because Role A's ``main-agent`` is not on this branch
-    yet. That default is a liability rather than a convenience: a fake that
-    ships looks exactly like a working system until someone reads a negotiation
-    email. ``/health`` reports which one is live for that reason.
+    ``main-agent`` is merged and the default is still the fake, deliberately —
+    the same posture as ``mail_backend``. That default is a liability rather
+    than a convenience: a fake that ships looks exactly like a working system
+    until someone reads a negotiation email. ``/health`` reports which one is
+    live, and with which model, for that reason.
     """
 
     gemini_model: str = "gemini-3.7-flash"

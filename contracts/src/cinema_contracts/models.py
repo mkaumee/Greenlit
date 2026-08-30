@@ -77,7 +77,7 @@ class SupplierCandidate(_Frozen):
     notes: str = ""
 
 
-class BreakdownSource(_Frozen):
+class ScriptSource(_Frozen):
     """An uploaded screenplay, before anyone has read it for objects."""
 
     filename: str
@@ -100,7 +100,7 @@ class SceneMention(_Frozen):
     page: int | None = None
 
 
-class ItemDraft(_Frozen):
+class PropDraft(_Frozen):
     """One physical thing a scene needs, as found in the script.
 
     A draft because nothing is persisted until the producer confirms the list.

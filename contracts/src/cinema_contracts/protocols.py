@@ -16,14 +16,14 @@ All four methods are ``async`` because all four make network-bound LLM calls.
 from typing import Protocol, runtime_checkable
 
 from cinema_contracts.models import (
-    BreakdownSource,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    PropDraft,
     QuoteExtraction,
+    ScriptSource,
 )
 
 
@@ -35,7 +35,7 @@ class AgentBrain(Protocol):
     same input, same kind of output, no writes anywhere.
     """
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
         """Read a screenplay and list every physical thing a scene needs.
 
         This is the job a human does with a highlighter before a shoot. The

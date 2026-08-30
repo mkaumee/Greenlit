@@ -111,6 +111,11 @@ async def test_health_says_which_transports_are_wired(api: httpx.AsyncClient) ->
     assert body["brain_backend"] == "scripted"
     assert body["mail_backend"] == "memory"
     assert body["token_backend"] == "file"
+    # The scripted brain has no model and no web search. Reported as such
+    # rather than omitted, so "which of these two is running" is answerable
+    # from outside the container.
+    assert body["gemini_model"] == ""
+    assert body["research_web_search"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -208,21 +213,36 @@ def test_mail_defaults_to_memory_so_nothing_emails_a_real_seller() -> None:
 
 
 def test_the_brain_defaults_to_the_fake_and_says_so() -> None:
-    """Role A's brain is on another branch, so the fake is the only option.
+    """The real brain is merged now, and the default is still the fake.
 
-    It is reported on /health rather than assumed, because a keyword matcher
-    writing negotiation emails looks like a working system right up until
-    somebody reads one.
+    Deliberately. Turning on reasoning that emails real sellers is an explicit
+    choice, the same as turning on mail — and it is reported on /health rather
+    than assumed, because a keyword matcher writing negotiation emails looks
+    like a working system right up until somebody reads one.
     """
     assert isinstance(build_brain(SETTINGS), ScriptedBrain)
 
 
-def test_selecting_the_real_brain_before_it_exists_fails_loudly() -> None:
-    """Not a silent fallback. Shipping the fake by accident is the failure mode."""
+def test_selecting_the_real_brain_without_the_package_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not a silent fallback. Shipping the fake by accident is the failure mode.
+
+    ``main_agent`` is merged and installed, so the import cannot fail by
+    itself any more — the way it fails now is a deployed image built without
+    the ``COPY main-agent/`` lines. That is worth keeping a guard on precisely
+    because everything else about such an image looks fine.
+    """
+
+    def refuse(name: str) -> object:
+        raise ImportError(name)
+
+    monkeypatch.setattr("orchestrator.app.importlib.import_module", refuse)
     real = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         brain_backend=BrainBackend.MAIN_AGENT,
     )
+
     with pytest.raises(RuntimeError, match="main_agent is not importable"):
         _ = build_brain(real)
 
@@ -308,7 +328,10 @@ async def test_a_tick_with_no_projects_still_logs(
 def test_the_real_brain_is_built_with_the_configured_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wiring to Role A's brain, provable before role_a is merged.
+    """The wiring to Role A's brain, pinned against a fake module.
+
+    Still a fake rather than the real class: constructing ``GeminiAgentBrain``
+    builds four ADK agents, which is not something a unit test should do.
 
     ``GeminiAgentBrain`` takes ``model`` as a required keyword deliberately —
     Role A's docstring says the application wiring chooses the deployed model
@@ -326,7 +349,7 @@ def test_the_real_brain_is_built_with_the_configured_model(
         # Underscored: the protocol needs the methods to exist with the right
         # names, not to do anything. isinstance() against a runtime_checkable
         # Protocol checks presence only.
-        async def parse_breakdown(self, _source: object) -> list[object]:
+        async def extract_props(self, _source: object) -> list[object]:
             return []
 
         async def research_item(self, _brief: object) -> object: ...
@@ -336,6 +359,7 @@ def test_the_real_brain_is_built_with_the_configured_model(
     module = types.ModuleType("main_agent")
     module.GeminiAgentBrain = FakeBrain  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, "main_agent", module)
+    monkeypatch.setenv("PARALLEL_API_KEY", "present-for-this-test")
 
     brain = build_brain(
         Settings(
@@ -381,3 +405,40 @@ async def test_a_project_with_no_owner_is_created_unreachable(
     record = await FirestoreRepository(firestore).get_project("orphan")
     assert record is not None
     assert record.owner_uid == ""
+
+
+# --------------------------------------------------------------------------- #
+# Starting on the real brain
+# --------------------------------------------------------------------------- #
+
+
+def test_the_real_brain_refuses_to_start_without_a_research_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The silent one.
+
+    Without PARALLEL_API_KEY the search call raises, the researcher catches it
+    and tells the model "web search failed", and the model answers from memory
+    anyway. What comes out is a reference price band and supplier URLs with
+    nothing behind them — in a system whose whole claim is that it keeps the
+    URLs it got its numbers from. Nothing errors and nothing logs.
+    """
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        brain_backend=BrainBackend.MAIN_AGENT,
+    )
+
+    with pytest.raises(RuntimeError, match="PARALLEL_API_KEY"):
+        _ = build_brain(settings)
+
+
+def test_the_scripted_brain_needs_no_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default has to keep working on a laptop with no credentials."""
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        brain_backend=BrainBackend.SCRIPTED,
+    )
+
+    assert isinstance(build_brain(settings), ScriptedBrain)

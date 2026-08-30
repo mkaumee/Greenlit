@@ -10,13 +10,11 @@ from datetime import UTC, datetime
 import pytest
 from cinema_contracts import (
     AgentBrain,
-    BreakdownSource,
     CurrencyMismatchError,
     EscalationReason,
     ExtractedQuote,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     MessageDirection,
     MessageSummary,
     Money,
@@ -24,8 +22,10 @@ from cinema_contracts import (
     NegotiationContext,
     NegotiationState,
     NextMove,
+    PropDraft,
     QuoteExtraction,
     SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.testing import ScriptedBrain
@@ -311,9 +311,9 @@ She lights a cigarette and checks her watch.
 """
 
 
-async def _props() -> list[ItemDraft]:
-    return await ScriptedBrain().parse_breakdown(
-        BreakdownSource(
+async def _props() -> list[PropDraft]:
+    return await ScriptedBrain().extract_props(
+        ScriptSource(
             filename="script.fountain", mime_type="text/plain", text_content=SCRIPT
         )
     )
@@ -350,8 +350,8 @@ async def test_a_mention_cannot_have_an_empty_line() -> None:
 
 
 async def test_a_script_with_no_props_returns_an_empty_list() -> None:
-    drafts = await ScriptedBrain().parse_breakdown(
-        BreakdownSource(
+    drafts = await ScriptedBrain().extract_props(
+        ScriptSource(
             filename="s.txt",
             mime_type="text/plain",
             text_content="INT. VOID - NIGHT\n\nShe thinks about her childhood.\n",
