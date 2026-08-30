@@ -2,6 +2,7 @@
 # CLAUDE.md IS committed on purpose: the hard rules are part of the deliverable.
 # Local agent session state is not.
 .claude/
+.serena/
 
 # --- secrets -----------------------------------------------------------------
 # Nothing resembling a credential is ever committed. Refresh tokens live in
