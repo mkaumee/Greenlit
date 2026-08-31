@@ -115,6 +115,7 @@ async def test_health_says_which_transports_are_wired(api: httpx.AsyncClient) ->
     # rather than omitted, so "which of these two is running" is answerable
     # from outside the container.
     assert body["gemini_model"] == ""
+    assert body["gemini_credentials"] == ""
     assert body["research_web_search"] is False
 
 
@@ -359,7 +360,7 @@ def test_the_real_brain_is_built_with_the_configured_model(
     module = types.ModuleType("main_agent")
     module.GeminiAgentBrain = FakeBrain  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, "main_agent", module)
-    monkeypatch.setenv("PARALLEL_API_KEY", "present-for-this-test")
+    _vertex_configured(monkeypatch)
 
     brain = build_brain(
         Settings(
@@ -412,6 +413,50 @@ async def test_a_project_with_no_owner_is_created_unreachable(
 # --------------------------------------------------------------------------- #
 
 
+def _vertex_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The credentials a deployed service has. Set so each test below isolates
+    the one thing it is about."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-cinema")
+    monkeypatch.setenv("PARALLEL_API_KEY", "present")
+
+
+def test_the_real_brain_refuses_to_start_without_gemini_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise every reasoning call fails at request time instead.
+
+    A tick would claim its rows, fail on the brain, and park them for the
+    lease — over and over, looking like a system that is merely slow rather
+    than one that was never given credentials.
+    """
+    _vertex_configured(monkeypatch)
+    for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        brain_backend=BrainBackend.MAIN_AGENT,
+    )
+
+    with pytest.raises(RuntimeError, match="Gemini has no credentials"):
+        _ = build_brain(settings)
+
+
+def test_vertex_without_a_project_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half-configured is the one that would look fine on the way out."""
+    _vertex_configured(monkeypatch)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        brain_backend=BrainBackend.MAIN_AGENT,
+    )
+
+    with pytest.raises(RuntimeError, match="GOOGLE_CLOUD_PROJECT"):
+        _ = build_brain(settings)
+
+
 def test_the_real_brain_refuses_to_start_without_a_research_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -423,6 +468,7 @@ def test_the_real_brain_refuses_to_start_without_a_research_key(
     nothing behind them — in a system whose whole claim is that it keeps the
     URLs it got its numbers from. Nothing errors and nothing logs.
     """
+    _vertex_configured(monkeypatch)
     monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]

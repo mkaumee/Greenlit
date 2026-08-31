@@ -294,3 +294,30 @@ thing to look at the morning after — `messages_sent`, `claims_lost`,
 | `/healthz` returns an HTML 404 while everything else works | Not our bug to fix — Google's front end swallows that path on Cloud Run. The health endpoint is `/health` for exactly this reason; do not rename it back. Proven on the deployed service: `/openapi.json` returned 200 listing `/healthz` as a registered route, an unknown path returned our own JSON 404, and `/healthz` alone returned Google's HTML. |
 | Verifier says the tick account can read `orders` | The service accounts are the wrong way round. This is the one that silently undoes Phase 4 — fix before anything else. |
 | Verifier reports a Firestore denial mentioning `Invalid choice` | Not a denial — a gcloud subcommand that does not exist, exiting non-zero. The guardrail check is testing nothing. Fixed once already (`gcloud firestore documents list` was invented); if it recurs, confirm the command exists before trusting the result. |
+
+## Turning the real brain on
+
+Gemini authenticates through **Vertex AI with the service account**, not an API
+key. We are already on Google Cloud and the account already exists, so there is
+nothing to store, rotate or leak — `deploy.sh` enables `aiplatform.googleapis.com`,
+grants `roles/aiplatform.user`, and sets the three names google-genai reads:
+`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`.
+
+The one credential that is still a key is research. Role A's researcher
+searches the web through Parallel:
+
+```bash
+PARALLEL_API_KEY=... BRAIN_BACKEND=main-agent \
+  PROJECT_ID=your-project-id ./scripts/deploy.sh
+```
+
+Without it the search call raises, the researcher catches it, and the model is
+told "web search failed" — so it answers anyway, from memory, and its price
+bands and supplier URLs are invented rather than sourced. Nothing errors and
+nothing logs. The deploy refuses that combination, the service refuses to start
+on it, and `/health` reports `research_web_search` so a service that lost the
+check is visible from outside.
+
+**Do not turn the brain and real mail on in the same deploy.** If the first
+live email to a seller reads badly, you want to know whether it was the
+reasoning or the transport.

@@ -104,6 +104,21 @@ APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
 BRAIN_BACKEND="${BRAIN_BACKEND:-scripted}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.7-flash}"
 
+# Role A's researcher searches the web through Parallel, and that SDK reads
+# this name itself. Declared with a default because `set -u` is on: referenced
+# without one, an unset key aborts the whole deploy with "unbound variable"
+# rather than reaching the preflight that explains what is missing.
+PARALLEL_API_KEY="${PARALLEL_API_KEY:-}"
+
+# Gemini through Vertex AI rather than an API key.
+#
+# We are already on Google Cloud and the service account already exists, so
+# Vertex authenticates with it directly: nothing to store, rotate or leak, and
+# no secret sitting in an env var that `gcloud run describe` prints back.
+# google-genai reads exactly these three names — confirmed against the
+# installed SDK, not recalled.
+VERTEX_LOCATION="${VERTEX_LOCATION:-$REGION}"
+
 # The panel is served from Firebase Hosting and this service from Cloud Run, so
 # every approval a producer makes is a cross-origin POST. Without these origins
 # the browser refuses at the preflight, before any route runs, and the console
@@ -271,7 +286,8 @@ say "APIs"
 enabled=$(gcloud services list --enabled --format='value(config.name)')
 for api in run.googleapis.com cloudscheduler.googleapis.com \
            artifactregistry.googleapis.com cloudbuild.googleapis.com \
-           secretmanager.googleapis.com iamcredentials.googleapis.com; do
+           secretmanager.googleapis.com iamcredentials.googleapis.com \
+           aiplatform.googleapis.com; do
   if grep -qx "$api" <<<"$enabled"; then skip "$api"; else
     gcloud services enable "$api" >/dev/null && ok "$api"
   fi
@@ -327,6 +343,26 @@ else
     --role="roles/datastore.user" \
     --condition=None >/dev/null
   ok "datastore.user for $APPROVALS_SA — both databases, deliberately"
+fi
+
+# Vertex AI, for the tick service only — it is the one that reasons.
+#
+# This is what replaces a Gemini API key: the account authenticates as itself,
+# so there is no key to store or rotate and nothing secret in the deployed
+# environment. roles/aiplatform.user is the smallest role that can call a
+# published model; it does not permit training, tuning or model management.
+#
+# Granted whether or not BRAIN_BACKEND is main-agent, so that switching the
+# brain on later is one variable rather than a variable and an IAM change
+# nobody remembers.
+if has_role "$AGENT_EMAIL" "roles/aiplatform.user"; then
+  skip "aiplatform.user for $AGENT_SA"
+else
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${AGENT_EMAIL}" \
+    --role="roles/aiplatform.user" \
+    --condition=None >/dev/null
+  ok "aiplatform.user for $AGENT_SA — Gemini through Vertex, no API key"
 fi
 
 # Reading the token secret is the tick service's business only. The approvals
@@ -408,6 +444,12 @@ TICK_ENV="${TICK_ENV}@CINEMA_GEMINI_MODEL=${GEMINI_MODEL}"
 TICK_ENV="${TICK_ENV}@CINEMA_TOKEN_BACKEND=secret-manager"
 TICK_ENV="${TICK_ENV}@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}"
 TICK_ENV="${TICK_ENV}@CINEMA_LOG_FORMAT=json"
+# Not prefixed CINEMA_: google-genai reads these names itself. Set on every
+# deploy, so turning the real brain on later does not also mean remembering
+# these three.
+TICK_ENV="${TICK_ENV}@GOOGLE_GENAI_USE_VERTEXAI=true"
+TICK_ENV="${TICK_ENV}@GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
+TICK_ENV="${TICK_ENV}@GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION}"
 if [[ -n "$PARALLEL_API_KEY" ]]; then
   # Not prefixed CINEMA_: the Parallel SDK reads this name itself.
   TICK_ENV="${TICK_ENV}@PARALLEL_API_KEY=${PARALLEL_API_KEY}"

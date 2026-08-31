@@ -89,6 +89,15 @@ def build_mail(settings: Settings) -> MailTransport:
     return InMemoryMailbox()
 
 
+def _gemini_credentials() -> str:
+    """Which route Gemini authenticates by, for reporting on /health."""
+    if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {"true", "1"}:
+        return "vertex"
+    if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+        return "api-key"
+    return ""
+
+
 def build_brain(settings: Settings) -> AgentBrain:
     """The reasoning half. Role A's, or the fake standing in for it.
 
@@ -125,6 +134,32 @@ def build_brain(settings: Settings) -> AgentBrain:
         # URLs with nothing behind them, in a system whose entire claim is that
         # it keeps the URLs it got its numbers from. Nothing errors and nothing
         # logs; a producer just gets invented evidence.
+        # Gemini reaches Vertex through the service account, or an API key,
+        # and google-genai reads these names itself. Neither present means
+        # every reasoning call fails at request time rather than at startup —
+        # so a tick would claim rows, fail, and park them for the lease, over
+        # and over, looking like a slow system rather than an unconfigured one.
+        vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {
+            "true",
+            "1",
+        }
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if not vertex and not api_key:
+            raise RuntimeError(
+                "CINEMA_BRAIN_BACKEND=main-agent, but Gemini has no "
+                "credentials. On Cloud Run set GOOGLE_GENAI_USE_VERTEXAI=true "
+                "with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION, and give "
+                "the service account roles/aiplatform.user — scripts/deploy.sh "
+                "does all three. GOOGLE_API_KEY also works and is worse: a key "
+                "to store and rotate where the account already authenticates."
+            )
+        if vertex and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+            raise RuntimeError(
+                "GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT is "
+                "not. Vertex cannot infer the project, so every reasoning call "
+                "would fail — at request time, one negotiation at a time."
+            )
+
         if not os.environ.get("PARALLEL_API_KEY"):
             raise RuntimeError(
                 "CINEMA_BRAIN_BACKEND=main-agent, but PARALLEL_API_KEY is not "
@@ -211,6 +246,12 @@ class Health(BaseModel):
     brain_backend: str
     gemini_model: str
     """Which model is reasoning. Empty on the scripted brain, which has none."""
+    gemini_credentials: str
+    """How Gemini authenticates: "vertex", "api-key", or "" on the fake.
+
+    Vertex means the service account signs its own calls and there is no key
+    anywhere in the deployment. Worth reporting rather than assuming, because
+    the two look identical from the outside until one of them leaks."""
     research_web_search: bool
     """Whether item research can actually search the web.
 
@@ -286,6 +327,7 @@ async def health(request: Request) -> Health:
         status="ok",
         brain_backend=settings.brain_backend.value,
         gemini_model=settings.gemini_model if real_brain else "",
+        gemini_credentials=_gemini_credentials() if real_brain else "",
         research_web_search=real_brain and bool(os.environ.get("PARALLEL_API_KEY")),
         mail_backend=settings.mail_backend.value,
         token_backend=settings.token_backend.value,
