@@ -303,6 +303,20 @@ nothing to store, rotate or leak — `deploy.sh` enables `aiplatform.googleapis.
 grants `roles/aiplatform.user`, and sets the three names google-genai reads:
 `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`.
 
+### The OAuth client
+
+`deploy.sh` reads the client id and secret out of the JSON you downloaded from
+the Cloud Console — `.secrets/client_secret.json` by default, or point
+`OAUTH_CLIENT_SECRETS` at it. Both shapes work: `web` for a Web application
+client, which is what the connect flow needs, and `installed` for a Desktop
+one.
+
+Setting `CINEMA_OAUTH_CLIENT_ID` and `CINEMA_OAUTH_CLIENT_SECRET` explicitly
+still wins, for a machine that has no client file. Otherwise leave them alone —
+copying two strings out of a file we already know how to find is a place to
+paste the wrong thing, and a client secret truncated by a stray newline fails
+as `invalid_client`, which names nothing useful.
+
 The one credential that is still a key is research. Role A's researcher
 searches the web through Parallel:
 

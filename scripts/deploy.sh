@@ -140,6 +140,48 @@ MAIL_BACKEND="${MAIL_BACKEND:-memory}"
 OAUTH_CLIENT_ID="${CINEMA_OAUTH_CLIENT_ID:-}"
 OAUTH_CLIENT_SECRET="${CINEMA_OAUTH_CLIENT_SECRET:-}"
 
+# Read out of the downloaded client JSON when they are not set explicitly.
+#
+# The same reasoning as client_credentials() in gmail.py, which has done this
+# on the Python side all along: the file's path is already configuration, so
+# asking a person to open it and copy two strings out is friction and a place
+# to paste the wrong thing. A client secret ending up truncated by a stray
+# newline fails as invalid_client, which names nothing.
+#
+# Handles both shapes Google produces — `installed` for a Desktop client and
+# `web` for a Web-application one. This flow needs the Web one; the other is
+# accepted because the same file feeds oauth_bootstrap.py.
+OAUTH_CLIENT_SECRETS="${OAUTH_CLIENT_SECRETS:-.secrets/client_secret.json}"
+
+if [[ -z "$OAUTH_CLIENT_ID" && -f "$OAUTH_CLIENT_SECRETS" ]]; then
+  read -r OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET < <(
+    python3 - "$OAUTH_CLIENT_SECRETS" <<'PYEOF'
+import json, sys
+
+try:
+    blob = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    print(" ")
+    raise SystemExit(0)
+
+for shape in ("web", "installed"):
+    section = blob.get(shape)
+    if isinstance(section, dict):
+        cid = section.get("client_id") or ""
+        secret = section.get("client_secret") or ""
+        if cid and secret:
+            print(f"{cid} {secret}")
+            break
+else:
+    print(" ")
+PYEOF
+  ) || true
+  if [[ -n "$OAUTH_CLIENT_ID" ]]; then
+    ok_later_oauth="read the OAuth client from $OAUTH_CLIENT_SECRETS"
+  fi
+fi
+ok_later_oauth="${ok_later_oauth:-}"
+
 if [[ -z "$PROJECT_ID" ]]; then
   echo "PROJECT_ID is not set." >&2
   echo "  PROJECT_ID=your-project-id $0" >&2
@@ -156,6 +198,12 @@ done
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 skip() { printf '  \033[90m·\033[0m %s (already there)\n' "$*"; }
+
+# Deferred until ok() exists — the client JSON is read before the helpers are
+# defined, because every preflight below wants the values.
+if [[ -n "$ok_later_oauth" ]]; then
+  ok "$ok_later_oauth"
+fi
 
 AGENT_EMAIL="${AGENT_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 APPROVALS_EMAIL="${APPROVALS_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
