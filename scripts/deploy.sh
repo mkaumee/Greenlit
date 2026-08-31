@@ -84,12 +84,21 @@ IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)
 
 AGENT_SA="${AGENT_SA:-cinema-agent}"
 APPROVALS_SA="${APPROVALS_SA:-cinema-approvals}"
+API_SA="${API_SA:-cinema-api}"
 SCHEDULER_SA="${SCHEDULER_SA:-cinema-scheduler}"
 ORDERS_DB="${ORDERS_DB:-orders}"
 TOKEN_SECRET="${TOKEN_SECRET:-gmail-agent-refresh-token}"
 
 TICK_SERVICE="${TICK_SERVICE:-cinema-tick}"
 APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
+API_SERVICE="${API_SERVICE:-cinema-api}"
+
+# The role the api service holds over Secret Manager, and the reason it is a
+# custom one. It must create a secret per producer and add versions to it, and
+# it must never be able to read one back — a service that stores mailbox
+# credentials has no business using them. Every predefined role that can write
+# can also read, so this is defined rather than chosen.
+TOKEN_WRITER_ROLE="${TOKEN_WRITER_ROLE:-cinemaTokenWriter}"
 
 # Which reasoning runs. Defaults to the fake for the same reason mail defaults
 # to memory: shipping the wrong one is silent. A regex writing negotiation
@@ -150,6 +159,7 @@ skip() { printf '  \033[90m·\033[0m %s (already there)\n' "$*"; }
 
 AGENT_EMAIL="${AGENT_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 APPROVALS_EMAIL="${APPROVALS_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+API_EMAIL="${API_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 SCHEDULER_EMAIL="${SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/orchestrator:${IMAGE_TAG}"
 
@@ -312,6 +322,8 @@ ensure_sa "$AGENT_SA" "$AGENT_EMAIL" \
   "Runs the tick loop. Deliberately cannot write purchase orders."
 ensure_sa "$APPROVALS_SA" "$APPROVALS_EMAIL" \
   "Runs the approval service. The only identity that may write an order."
+ensure_sa "$API_SA" "$API_EMAIL" \
+  "Serves the producer's browser. Cannot write purchase orders."
 ensure_sa "$SCHEDULER_SA" "$SCHEDULER_EMAIL" \
   "Mints the OIDC token Cloud Scheduler calls /tick with."
 
@@ -343,6 +355,62 @@ else
     --role="roles/datastore.user" \
     --condition=None >/dev/null
   ok "datastore.user for $APPROVALS_SA — both databases, deliberately"
+fi
+
+# The api service reaches (default) and nothing else. Same conditioned shape as
+# the agent's, and for the same reason: Firestore IAM cannot name a collection,
+# so "may not write a purchase order" has to mean "has no binding on the orders
+# database". This is what makes the third service worth its cost.
+if has_role "$API_EMAIL" "roles/datastore.user"; then
+  skip "datastore.user for $API_SA"
+else
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${API_EMAIL}" \
+    --role="roles/datastore.user" \
+    --condition="expression=resource.name.startsWith('projects/${PROJECT_ID}/databases/(default)'),title=default_database_only,description=No access to the orders database." \
+    >/dev/null
+  ok "datastore.user for $API_SA — (default) only, CONDITIONED"
+fi
+
+# Writing a producer's refresh token, without being able to read one.
+#
+# Every predefined Secret Manager role that can write can also read, so the
+# smallest correct grant does not exist and has to be defined. secretAccessor
+# is deliberately absent: the service that stores a mailbox credential has no
+# business using it, and the tick service — which does — cannot create one.
+if gcloud iam roles describe "$TOKEN_WRITER_ROLE" --project="$PROJECT_ID" \
+     >/dev/null 2>&1; then
+  skip "role $TOKEN_WRITER_ROLE"
+else
+  gcloud iam roles create "$TOKEN_WRITER_ROLE" --project="$PROJECT_ID" \
+    --title="Greenlit token writer" \
+    --description="Create and add versions to producer refresh-token secrets. Cannot read them." \
+    --permissions="secretmanager.secrets.create,secretmanager.secrets.get,secretmanager.versions.add" \
+    --stage=GA >/dev/null
+  ok "role $TOKEN_WRITER_ROLE — write a token, never read one"
+fi
+
+if has_role "$API_EMAIL" "projects/${PROJECT_ID}/roles/${TOKEN_WRITER_ROLE}"; then
+  skip "$TOKEN_WRITER_ROLE for $API_SA"
+else
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${API_EMAIL}" \
+    --role="projects/${PROJECT_ID}/roles/${TOKEN_WRITER_ROLE}" \
+    --condition=None >/dev/null
+  ok "$TOKEN_WRITER_ROLE for $API_SA"
+fi
+
+# The tick service reads them. Project-level rather than per-secret because a
+# producer's secret does not exist until they connect, and you cannot grant
+# accessor on a secret that is not there yet.
+if has_role "$AGENT_EMAIL" "roles/secretmanager.secretAccessor"; then
+  skip "secretAccessor for $AGENT_SA"
+else
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${AGENT_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --condition=None >/dev/null
+  ok "secretAccessor for $AGENT_SA — reads producer tokens, creates none"
 fi
 
 # Vertex AI, for the tick service only — it is the one that reasons.
@@ -454,9 +522,13 @@ if [[ -n "$PARALLEL_API_KEY" ]]; then
   # Not prefixed CINEMA_: the Parallel SDK reads this name itself.
   TICK_ENV="${TICK_ENV}@PARALLEL_API_KEY=${PARALLEL_API_KEY}"
 fi
+API_OAUTH_ENV=""
 if [[ -n "$OAUTH_CLIENT_ID" ]]; then
   TICK_ENV="${TICK_ENV}@CINEMA_OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}"
   TICK_ENV="${TICK_ENV}@CINEMA_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}"
+  # The api service exchanges authorization codes, so it needs the same client.
+  API_OAUTH_ENV="@CINEMA_OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}"
+  API_OAUTH_ENV="${API_OAUTH_ENV}@CINEMA_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}"
 fi
 if [[ -n "${CINEMA_AGENT_EMAIL:-}" ]]; then
   TICK_ENV="${TICK_ENV}@CINEMA_AGENT_EMAIL=${CINEMA_AGENT_EMAIL}"
@@ -503,6 +575,36 @@ gcloud run deploy "$APPROVALS_SERVICE" \
   --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_ORDERS_DATABASE=${ORDERS_DB}@CINEMA_LOG_FORMAT=json@CINEMA_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}" \
   --quiet >/dev/null
 ok "$APPROVALS_SERVICE  (orchestrator.approvals:app, as $APPROVALS_SA)"
+
+# The producer's browser talks to this one. Same image, a third command, and an
+# account that cannot reach the orders database.
+gcloud run deploy "$API_SERVICE" \
+  --image="$IMAGE" \
+  --region="$REGION" \
+  --service-account="$API_EMAIL" \
+  --allow-unauthenticated \
+  --command=uvicorn \
+  --args="orchestrator.api:app,--host,0.0.0.0,--port,8080" \
+  --timeout=60s \
+  --max-instances=2 \
+  --memory=512Mi \
+  --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_LOG_FORMAT=json@CINEMA_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}@CINEMA_TOKEN_BACKEND=secret-manager@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}${API_OAUTH_ENV}" \
+  --quiet >/dev/null
+ok "$API_SERVICE  (orchestrator.api:app, as $API_SA)"
+
+API_URL=$(gcloud run services describe "$API_SERVICE" \
+  --region="$REGION" --format='value(status.url)')
+
+# The redirect URI is this service's own URL, which does not exist until the
+# service does — so it is set on a second pass rather than guessed. Configured
+# rather than derived per request from the Host header: that header is
+# attacker-controlled, and a redirect_uri built from it is a way to have Google
+# hand an authorization code somewhere else.
+REDIRECT_URI="${API_URL}/mailbox/callback"
+gcloud run services update "$API_SERVICE" --region="$REGION" \
+  --update-env-vars="CINEMA_OAUTH_REDIRECT_URI=${REDIRECT_URI}" \
+  --quiet >/dev/null
+ok "redirect URI configured — register it, see below"
 
 TICK_URL=$(gcloud run services describe "$TICK_SERVICE" --region="$REGION" \
   --format='value(status.url)')
@@ -577,6 +679,7 @@ $(printf '\033[1mDeployed\033[0m')
 
   tick       $TICK_URL      (private; Scheduler only)
   approvals  $APPROVALS_URL
+  api        $API_URL
 
 $(printf '\033[1mNow verify it\033[0m')
 
@@ -592,10 +695,11 @@ $(printf '\033[1mThen\033[0m')
 $NEXT_MAIL
 $(printf '\033[1mBefore a producer can connect their Gmail\033[0m')
 
-  Register this on the Web OAuth client — it cannot be scripted, gcloud does
-  not expose OAuth client redirect URIs:
+  The service is already configured with this. What is left is registering it
+  on the Web OAuth client, which cannot be scripted — gcloud does not expose
+  OAuth client redirect URIs at all:
 
-    ${APPROVALS_URL}/mailbox/callback
+    ${REDIRECT_URI}
 
   Cloud Run also answers to a second hostname for the same service, and OAuth
   compares redirect_uri as an exact string. Register both. The script below

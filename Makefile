@@ -21,6 +21,7 @@ endif
 # Cloud resource names, shared by the deploy targets so they cannot drift.
 REGION ?= us-central1
 APPROVALS_SERVICE ?= cinema-approvals
+API_SERVICE ?= cinema-api
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
 .PHONY: gcp-setup deploy-rules deploy verify-deploy redirect-uri require-firebase require-gcloud require-project

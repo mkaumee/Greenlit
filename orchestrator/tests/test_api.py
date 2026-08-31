@@ -217,3 +217,17 @@ def test_the_composition_root_builds_no_orders_client() -> None:
         assert not hasattr(services, "orders")
     finally:
         services.client.close()
+
+
+def test_the_api_service_holds_no_client_for_the_orders_database() -> None:
+    """Belt and braces on the same boundary, one layer down.
+
+    Even with a wrong IAM binding there is nothing in this service's
+    composition root that could reach purchase orders — no orders client, and
+    the repository it holds has no method that writes one.
+    """
+    fields = set(ApiServices.__dataclass_fields__)
+
+    assert "orders" not in fields
+    assert "orders_client" not in fields
+    assert not [m for m in dir(FirestoreRepository) if "purchase_order" in m]

@@ -43,9 +43,11 @@ PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
 AGENT_SA="${AGENT_SA:-cinema-agent}"
 APPROVALS_SA="${APPROVALS_SA:-cinema-approvals}"
+API_SA="${API_SA:-cinema-api}"
 ORDERS_DB="${ORDERS_DB:-orders}"
 TICK_SERVICE="${TICK_SERVICE:-cinema-tick}"
 APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
+API_SERVICE="${API_SERVICE:-cinema-api}"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "PROJECT_ID is not set." >&2
@@ -56,6 +58,7 @@ command -v gcloud >/dev/null || { echo "gcloud is not installed." >&2; exit 2; }
 
 AGENT_EMAIL="${AGENT_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 APPROVALS_EMAIL="${APPROVALS_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+API_EMAIL="${API_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 PASSED=0
 FAILED=0
@@ -285,6 +288,21 @@ case $? in
       note "unconditioned roles/datastore.user on $AGENT_SA."
     else
       pass "the tick account cannot touch '$ORDERS_DB' — Hard Rule 5 holds"
+    fi
+
+    # The api service serves the producer's browser and is the newest way this
+    # could quietly stop being true: one wrong role on it and the identity
+    # behind every chat message and script upload can write purchase orders.
+    if gcloud iam service-accounts describe "$API_EMAIL" >/dev/null 2>&1; then
+      if try_read "$API_EMAIL" "$ORDERS_DB"; then
+        fail "the api account CAN read the '$ORDERS_DB' database"
+        note "That account serves the browser. It must not reach money."
+        note "Look for an unconditioned roles/datastore.user on $API_SA."
+      else
+        pass "the api account cannot touch '$ORDERS_DB' either"
+      fi
+    else
+      huh "no $API_SA account yet — run scripts/deploy.sh"
     fi
     ;;
   1)

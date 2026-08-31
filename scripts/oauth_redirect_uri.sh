@@ -37,7 +37,10 @@ set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
-APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
+# The producer-facing service, which is where the callback lives. Not the
+# approvals service: that one only handles money, and the connect flow was
+# deliberately kept off the identity that can write a purchase order.
+API_SERVICE="${API_SERVICE:-cinema-api}"
 LOCAL_PORT="${LOCAL_PORT:-8000}"
 
 if [[ -z "$PROJECT_ID" ]]; then
@@ -52,15 +55,15 @@ command -v gcloud >/dev/null || {
   exit 2
 }
 
-URL=$(gcloud run services describe "$APPROVALS_SERVICE" \
+URL=$(gcloud run services describe "$API_SERVICE" \
   --region="$REGION" --project="$PROJECT_ID" \
   --format='value(status.url)' 2>/dev/null || true)
 
 # Cloud Run answers to two hostnames for the same service, and they are not
 # interchangeable to Google's OAuth check.
 #
-#   cinema-approvals-efbejege7q-uc.a.run.app     the older hash form
-#   cinema-approvals-678371873554.us-central1... the newer project-number form
+#   cinema-api-efbejege7q-uc.a.run.app     the older hash form
+#   cinema-api-678371873554.us-central1... the newer project-number form
 #
 # `gcloud run deploy` prints the second; `describe --format=status.url` returns
 # the first. Both route to the same container, so the difference is invisible
@@ -71,12 +74,12 @@ PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" \
   --format='value(projectNumber)' 2>/dev/null || true)
 ALT=""
 if [[ -n "$PROJECT_NUMBER" ]]; then
-  ALT="https://${APPROVALS_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+  ALT="https://${API_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 fi
 
 if [[ -z "$URL" ]]; then
   cat >&2 <<EOF
-  ✗ no $APPROVALS_SERVICE service in $PROJECT_ID ($REGION).
+  ✗ no $API_SERVICE service in $PROJECT_ID ($REGION).
 
   The redirect URI is derived from that service's URL, so it cannot be known
   until it exists. Deploy first:
