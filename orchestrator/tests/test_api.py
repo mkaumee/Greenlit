@@ -19,11 +19,25 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+from cinema_contracts import (
+    ClockMode,
+    ExtractedQuote,
+    Money,
+    NegotiationState,
+    SceneMention,
+)
 from conftest import TokenMinter
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.api import ApiServices, app, build_api_services
 from orchestrator.auth import init_firebase
-from orchestrator.clock import SimClock
+from orchestrator.clock import ClockState, SimClock
+from orchestrator.records import (
+    ItemRecord,
+    ItemStatus,
+    NegotiationRecord,
+    ProjectRecord,
+    SupplierRecord,
+)
 from orchestrator.repository import FirestoreRepository
 from orchestrator.settings import Settings
 
@@ -231,3 +245,129 @@ def test_the_api_service_holds_no_client_for_the_orders_database() -> None:
     assert "orders" not in fields
     assert "orders_client" not in fields
     assert not [m for m in dir(FirestoreRepository) if "purchase_order" in m]
+
+
+# --------------------------------------------------------------------------- #
+# Talking to the agent
+# --------------------------------------------------------------------------- #
+
+
+async def _owned_project(
+    firestore: AsyncClient, project_id: str, owner: str
+) -> FirestoreRepository:
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(
+        project_id,
+        ProjectRecord(
+            title="Kopitiam",
+            clock=ClockState(
+                sim_now=T0, real_anchor=T0, speed=0.0, mode=ClockMode.FROZEN
+            ),
+            created_at=T0,
+            owner_uid=owner,
+        ),
+    )
+    await repo.save_item(
+        project_id,
+        "mirror",
+        ItemRecord(
+            name="Mirror",
+            category="prop",
+            status=ItemStatus.SOURCING,
+            mentions=[
+                SceneMention(scene_number="12", line="He threw it at the mirror")
+            ],
+        ),
+    )
+    await repo.save_supplier(
+        project_id,
+        "sup1",
+        SupplierRecord(name="Ah Seng Rentals", email="s@example.invalid"),
+    )
+    await repo.save_negotiation(
+        project_id,
+        "neg1",
+        NegotiationRecord(
+            item_id="mirror",
+            supplier_id="sup1",
+            state=NegotiationState.READY_FOR_HUMAN,
+            rounds_used=3,
+            latest_quote=ExtractedQuote(
+                unit_price=Money(amount=719, currency="MYR"),
+                total=Money(amount=719, currency="MYR"),
+            ),
+            escalation_reason="GOOD_QUOTE",
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    return repo
+
+
+async def test_chat_answers_from_stored_facts(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    owner = tokens.create("owner@example.invalid")
+    headers = {
+        "Authorization": f"Bearer {tokens.grant(owner, 'owner@example.invalid')}"
+    }
+    _ = await _owned_project(firestore, "kopitiam", owner)
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": "kopitiam", "question": "what needs me?"},
+        )
+    ).json()
+
+    assert body["waiting_on_you"] == 1
+    assert "Ah Seng Rentals" in body["text"]
+    assert "719" in body["text"]
+    assert [r["id"] for r in body["references"]] == ["neg1"]
+
+
+async def test_chat_refuses_another_producers_project(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """The api service reads through the admin SDK, which bypasses
+    firestore.rules entirely — the same reason purchase orders needed their own
+    database. So the ownership check has to be here as well, or a signed-in
+    producer can summarise a rival production.
+    """
+    _ = await _owned_project(firestore, "someone-elses", "a-different-producer")
+
+    response = await api.post(
+        "/chat",
+        headers=_auth(tokens, "outsider@example.invalid"),
+        json={"project_id": "someone-elses", "question": "what needs me?"},
+    )
+
+    assert response.status_code == 404
+    assert "Kopitiam" not in response.text, "not even the title leaks"
+
+
+async def test_a_missing_project_and_a_stranger_look_identical(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Telling them apart would say whether a project id exists, which is not
+    the asker's to learn."""
+    _ = await _owned_project(firestore, "real-one", "a-different-producer")
+    headers = _auth(tokens, "prober@example.invalid")
+
+    existing = await api.post(
+        "/chat", headers=headers, json={"project_id": "real-one", "question": "hi"}
+    )
+    absent = await api.post(
+        "/chat", headers=headers, json={"project_id": "no-such", "question": "hi"}
+    )
+
+    assert existing.status_code == absent.status_code == 404
+
+
+async def test_chat_needs_a_producer(api: httpx.AsyncClient) -> None:
+    response = await api.post(
+        "/chat", json={"project_id": "anything", "question": "hi"}
+    )
+
+    assert response.status_code == 401

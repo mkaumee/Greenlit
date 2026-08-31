@@ -181,10 +181,18 @@ class TokenMinter:
 
     def mint(self, email: str, *, role: str = "") -> str:
         """Create a user, optionally give them a role, return their token."""
+        return self.grant(self.create(email), email, role=role)
+
+    def grant(self, uid: str, email: str, *, role: str = "producer") -> str:
+        """Give an existing user a role and sign them in again.
+
+        Split out of ``mint`` because a test that needs the uid — to own a
+        project, say — has to create the user first and cannot then call
+        ``mint``, which would try to sign the same email up twice.
+        """
         import firebase_admin
         from firebase_admin import auth as firebase_auth
 
-        uid = self.create(email)
         if role:
             assert firebase_admin._apps, (  # pyright: ignore[reportPrivateUsage]
                 "init_firebase must run before setting custom claims"

@@ -50,10 +50,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from google.cloud.firestore_v1 import AsyncClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from orchestrator.auth import Producer, init_firebase, require_producer
+from orchestrator.briefing import summarise
 from orchestrator.clock import SimClock
+from orchestrator.digest import ProjectDigest, build_digest
 from orchestrator.gmail import (
     GmailTransport,
     client_credentials,
@@ -395,3 +397,85 @@ async def _address_of(tokens: dict[str, object], settings: Settings) -> str:
     )
     transport = GmailTransport.from_credentials(credentials, settings)
     return await transport.connected_address()
+
+
+# --------------------------------------------------------------------------- #
+# Talking to the agent
+# --------------------------------------------------------------------------- #
+
+
+class Ask(BaseModel):
+    project_id: str
+    question: str = Field(min_length=1, max_length=2000)
+
+
+class Reference(BaseModel):
+    """Something the answer pointed at, that the panel renders as a link."""
+
+    kind: str
+    id: str
+    label: str
+
+
+class Answer(BaseModel):
+    text: str
+    references: list[Reference] = Field(default_factory=list)
+    waiting_on_you: int
+    """How many decisions are sitting at READY_FOR_HUMAN right now.
+
+    Returned on every answer rather than only when asked. The chat is one view
+    of that number and never the only one — a purchase decision that exists
+    solely in a transcript is a purchase decision that scrolls away.
+    """
+
+
+async def _digest_for(
+    services: ApiServices, project_id: str, producer: Producer
+) -> ProjectDigest:
+    """The facts this producer may be told about, and no others.
+
+    The ownership check is here rather than in the rules alone because the api
+    service reaches Firestore through the admin SDK, which bypasses
+    ``firestore.rules`` entirely — the same reason purchase orders needed their
+    own database. A signed-in producer asking about somebody else's production
+    gets a 404, not a summary of it.
+    """
+    project = await services.repo.get_project(project_id)
+    if project is None or project.owner_uid != producer.uid:
+        # Deliberately not distinguishing "no such project" from "not yours".
+        # The difference tells a caller whether a project id exists, which is
+        # not theirs to learn.
+        raise HTTPException(status_code=404, detail=f"no project {project_id}")
+
+    items = await services.repo.list_items(project_id)
+    negotiations = await services.repo.list_negotiations(project_id)
+
+    names: dict[str, str] = {}
+    for record in negotiations.values():
+        if record.supplier_id in names:
+            continue
+        supplier = await services.repo.get_supplier(project_id, record.supplier_id)
+        names[record.supplier_id] = supplier.name if supplier else record.supplier_id
+
+    return build_digest(project_id, project.title, items, negotiations, names)
+
+
+@app.post("/chat")
+async def chat(request: Request, body: Ask, producer: Signed) -> Answer:
+    """Answer a question about a production from what is actually stored.
+
+    Deterministic for now, and honestly so. Every number here is read from
+    Firestore rather than reasoned about, which is the right answer for "what
+    is going on" and is not pretending to be more. Free-form advice routes to
+    Role A's brain in the next step; until it does, this says what it can do
+    rather than inventing something.
+    """
+    services = services_of(request)
+    digest = await _digest_for(services, body.project_id, producer)
+    text, references = summarise(digest, body.question)
+    log.info("chat", extra={"project_id": body.project_id, "uid": producer.uid})
+    return Answer(
+        text=text,
+        references=[Reference(kind=k, id=i, label=lbl) for k, i, lbl in references],
+        waiting_on_you=digest.waiting_count,
+    )
