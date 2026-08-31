@@ -15,7 +15,7 @@ Everything is a plain read-compute-write. Nothing is cached between calls, so
 any handler using this repository is safe to kill mid-run — Hard Rule 3.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cinema_contracts import TERMINAL_STATES, Money
@@ -254,6 +254,59 @@ class FirestoreRepository:
             .document(uid)
             .set({"status": status.value, "updated_at": now}, merge=True)
         )
+
+    # ------------------------------------------------------------------ #
+    # OAuth state
+    # ------------------------------------------------------------------ #
+    #
+    # The only thing binding an authorization code to a producer. The callback
+    # arrives as a redirect from Google with no Authorization header, so there
+    # is nothing else to check: whoever presents a live state value is treated
+    # as the producer who started that consent.
+
+    async def create_oauth_state(self, state: str, uid: str, now: datetime) -> None:
+        """Record who began a consent. ``create``, so a value cannot be reused
+        even by whoever minted it."""
+        _ = (
+            await self._db.collection(OAUTH_STATES)
+            .document(state)
+            .create({"uid": uid, "created_at": now})
+        )
+
+    async def claim_oauth_state(
+        self, state: str, now: datetime, ttl: timedelta
+    ) -> str | None:
+        """Spend a state value, returning whose it was, or ``None``.
+
+        Deleted before the caller does anything with it, and the delete is
+        conditioned on the document's ``update_time``. Two callbacks racing the
+        same state — a double-clicked popup, or a replay — both read it and
+        both try; the storage engine admits exactly one. Filtering after the
+        read would let both through, which is the same class of bug the tick's
+        row claiming exists to stop.
+
+        Expiry, an unknown value and one already spent are deliberately not
+        distinguished: the caller has no legitimate use for the difference and
+        an attacker probing for a live value does.
+        """
+        ref = self._db.collection(OAUTH_STATES).document(state)
+        snapshot = await ref.get()
+        data = snapshot.to_dict()
+        if data is None:
+            return None
+
+        try:
+            _ = await ref.delete(
+                option=self._db.write_option(last_update_time=snapshot.update_time)
+            )
+        except FailedPrecondition:
+            # Somebody else spent it between our read and our delete.
+            return None
+
+        created = data.get("created_at")
+        if not isinstance(created, datetime) or now - created > ttl:
+            return None
+        return str(data.get("uid") or "") or None
 
     # ------------------------------------------------------------------ #
     # Items and suppliers

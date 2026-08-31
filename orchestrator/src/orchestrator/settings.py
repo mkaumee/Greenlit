@@ -142,6 +142,21 @@ class Settings(BaseSettings):
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
 
+    oauth_redirect_uri: str = ""
+    """Where Google sends a producer back after they consent.
+
+    Must match a URI registered on the Web OAuth client **exactly** — Google
+    compares it as a string, and a mismatch is refused with
+    ``redirect_uri_mismatch``, which names nothing useful. Configuration rather
+    than a value derived at request time from the incoming Host header: the
+    header is attacker-controlled, and a redirect_uri built from it is a way to
+    have Google hand an authorization code to somewhere else.
+
+    Empty means the connect flow refuses to start, rather than building a URL
+    that Google will reject after the producer has already granted access.
+    ``scripts/oauth_redirect_uri.sh`` prints the value to register.
+    """
+
     # -- credentials ------------------------------------------------------- #
 
     token_backend: TokenBackend = TokenBackend.FILE
