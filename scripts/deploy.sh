@@ -736,7 +736,7 @@ fi
 # approval that could be triggered on a timer would not be an approval.
 
 # ---------------------------------------------------------------------------
-say "What the two accounts can actually do"
+say "What the three accounts can actually do"
 # ---------------------------------------------------------------------------
 echo "  Read this. Do not trust the ticks above — this is the guardrail."
 echo
@@ -745,6 +745,14 @@ echo "  NOT show an unconditioned datastore.user:"
 gcloud projects get-iam-policy "$PROJECT_ID" \
   --flatten='bindings[].members' \
   --filter="bindings.members:serviceAccount:${AGENT_EMAIL}" \
+  --format='table(bindings.role, bindings.condition.expression)'
+echo
+echo "  $API_SA (browser-facing) — must also show a CONDITION naming (default)."
+echo "  It serves chat and script upload, so an unconditioned binding here"
+echo "  would put the identity behind every producer action next to the money:"
+gcloud projects get-iam-policy "$PROJECT_ID" \
+  --flatten='bindings[].members' \
+  --filter="bindings.members:serviceAccount:${API_EMAIL}" \
   --format='table(bindings.role, bindings.condition.expression)'
 echo
 echo "  $APPROVALS_SA — datastore.user with no condition is correct here:"
