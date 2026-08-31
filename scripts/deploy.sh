@@ -654,6 +654,50 @@ gcloud run services update "$API_SERVICE" --region="$REGION" \
   --quiet >/dev/null
 ok "redirect URI configured — register it, see below"
 
+# Which of your OAuth clients is the right one?
+#
+# A project typically has several Web clients: Firebase creates its own for
+# Google sign-in, and there is the one somebody made by hand for this flow.
+# They are indistinguishable by name and interchangeable-looking in the
+# console, and picking the wrong one fails as redirect_uri_mismatch — after a
+# producer has already been through the consent screen.
+#
+# The downloaded JSON lists that client's registered redirect_uris, so the
+# question is answerable here rather than guessed at. It is a snapshot from
+# download time, which is why this is a warning and not a refusal: registering
+# the URI after downloading is the normal case on a first deploy.
+REDIRECT_REGISTERED=""
+if [[ -f "$OAUTH_CLIENT_SECRETS" ]]; then
+  REDIRECT_REGISTERED=$(
+    python3 - "$OAUTH_CLIENT_SECRETS" "$REDIRECT_URI" <<'PYEOF'
+import json, sys
+
+try:
+    blob = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    raise SystemExit(0)
+
+for shape in ("web", "installed"):
+    section = blob.get(shape)
+    if isinstance(section, dict):
+        if sys.argv[2] in (section.get("redirect_uris") or []):
+            print("yes")
+        break
+PYEOF
+  ) || true
+fi
+
+if [[ "$REDIRECT_REGISTERED" == "yes" ]]; then
+  ok "that URI is already registered on the client in $OAUTH_CLIENT_SECRETS"
+elif [[ -f "$OAUTH_CLIENT_SECRETS" ]]; then
+  printf '  \033[33m!\033[0m the client in %s does not list that redirect URI.\n' \
+    "$OAUTH_CLIENT_SECRETS"
+  echo "    Expected on a first deploy — the URI did not exist until just now."
+  echo "    If you have several Web clients, the right one is whichever you"
+  echo "    register it on; re-download its JSON afterwards and this line will"
+  echo "    confirm you used the same one."
+fi
+
 TICK_URL=$(gcloud run services describe "$TICK_SERVICE" --region="$REGION" \
   --format='value(status.url)')
 APPROVALS_URL=$(gcloud run services describe "$APPROVALS_SERVICE" \

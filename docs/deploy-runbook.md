@@ -311,6 +311,18 @@ the Cloud Console — `.secrets/client_secret.json` by default, or point
 client, which is what the connect flow needs, and `installed` for a Desktop
 one.
 
+**A project usually has several Web clients.** Firebase creates one for Google
+sign-in when you enable it, and there is the one you made by hand for this
+flow. They look interchangeable in the console and are not: picking the wrong
+one fails as `redirect_uri_mismatch`, after a producer has already been
+through the consent screen.
+
+The right one is whichever has the `/mailbox/callback` URI in its **Authorised
+redirect URIs**. `deploy.sh` checks the JSON you gave it against the URI it
+just configured and says whether they match — so after you register the URI,
+re-download that client's JSON and the next deploy will confirm you are using
+the same client. Leave Firebase's own client alone.
+
 Setting `CINEMA_OAUTH_CLIENT_ID` and `CINEMA_OAUTH_CLIENT_SECRET` explicitly
 still wins, for a machine that has no client file. Otherwise leave them alone —
 copying two strings out of a file we already know how to find is a place to
