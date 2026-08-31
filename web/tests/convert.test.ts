@@ -1,0 +1,140 @@
+/**
+ * The converter, which is where a mistake would be invisible.
+ *
+ * Nothing here throws when it is wrong. A row mapped to the wrong shape
+ * renders as an empty bubble or as nothing at all, and the transcript quietly
+ * stops being a record of what the agent did — so these assertions are the
+ * only thing standing between a working screen and a convincing blank one.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { DECISION_TOOL, EMAIL_TOOL, toThreadMessage } from "../src/chat/convert";
+import { inOrder, type Row } from "../src/chat/rows";
+
+const AT = new Date("2026-03-01T09:00:00Z");
+
+const decision = (over: Partial<Row> = {}): Row => ({
+  kind: "decision",
+  id: "d-1",
+  negotiationId: "neg1",
+  itemId: "mirror",
+  itemName: "Mirror",
+  supplier: "Ah Seng Rentals",
+  price: "MYR 719",
+  roundsUsed: 3,
+  reason: "GOOD_QUOTE",
+  reasoning: "They moved twice and have stopped moving.",
+  at: AT,
+  ...over,
+} as Row);
+
+const activity = (over: Partial<Row> = {}): Row => ({
+  kind: "activity",
+  id: "a-1",
+  negotiationId: "neg1",
+  direction: "inbound",
+  supplier: "Ah Seng Rentals",
+  itemName: "Mirror",
+  subject: "Re: quote",
+  body: "RM719 per unit.",
+  at: AT,
+  ...over,
+} as Row);
+
+const partsOf = (row: Row) => {
+  const content = toThreadMessage(row).content;
+  return typeof content === "string" ? [] : [...content];
+};
+
+describe("what a producer must decide", () => {
+  it("carries an approval, so the library renders it as a decision", () => {
+    const [part] = partsOf(decision());
+
+    expect(part).toMatchObject({
+      type: "tool-call",
+      toolName: DECISION_TOOL,
+      approval: { id: "neg1" },
+    });
+  });
+
+  it("has no result, because it has not happened", () => {
+    // A decision that looked completed would read as a purchase already made.
+    // Nothing is bought until a person approves it, and the transcript must
+    // not imply otherwise.
+    const [part] = partsOf(decision());
+
+    expect(part).not.toHaveProperty("result");
+  });
+
+  it("carries the evidence a producer needs to judge it", () => {
+    // Price, who from, how many rounds, and the agent's own reasoning. Without
+    // these the card is a yes/no prompt about a number the producer cannot
+    // check — which is approval theatre, not approval.
+    const [part] = partsOf(decision());
+
+    expect(part).toMatchObject({
+      args: {
+        item: "Mirror",
+        supplier: "Ah Seng Rentals",
+        price: "MYR 719",
+        rounds: 3,
+        reasoning: "They moved twice and have stopped moving.",
+      },
+    });
+  });
+});
+
+describe("what the agent already did", () => {
+  it("is a completed tool call, not a pending one", () => {
+    const [part] = partsOf(activity());
+
+    expect(part).toMatchObject({ toolName: EMAIL_TOOL, result: { body: "RM719 per unit." } });
+    expect(part).not.toHaveProperty("approval");
+  });
+
+  it("says which direction the email went", () => {
+    // "We asked" and "they answered" look identical without it, and the whole
+    // point of the feed is watching a conversation happen.
+    const outbound = partsOf(activity({ direction: "outbound" } as Partial<Row>));
+
+    expect(outbound[0]).toMatchObject({ args: { direction: "outbound" } });
+  });
+});
+
+describe("turns a person took", () => {
+  it("maps a producer row to a user message", () => {
+    const message = toThreadMessage({
+      kind: "producer",
+      id: "p-1",
+      text: "what needs me?",
+      at: AT,
+    });
+
+    expect(message).toMatchObject({ role: "user" });
+    expect(partsOf({ kind: "producer", id: "p-1", text: "what needs me?", at: AT })[0])
+      .toMatchObject({ type: "text", text: "what needs me?" });
+  });
+});
+
+describe("order", () => {
+  it("reads in the order things happened, not the order they arrived", () => {
+    // A Firestore snapshot can deliver yesterday's supplier reply while a
+    // /chat answer is still in flight. Appending in arrival order would put
+    // yesterday's email after today's question, and the timeline is evidence.
+    const older = activity({ id: "a-old", at: new Date("2026-02-27T09:00:00Z") });
+    const newer = activity({ id: "a-new", at: new Date("2026-03-02T09:00:00Z") });
+
+    expect(inOrder([newer, older]).map((r) => r.id)).toEqual(["a-old", "a-new"]);
+  });
+
+  it("is stable when two things share a timestamp", () => {
+    // Two emails in the same simulated second must not swap places on every
+    // snapshot, which would make the transcript visibly flicker.
+    const first = activity({ id: "a-1" });
+    const second = activity({ id: "a-2" });
+
+    expect(inOrder([second, first]).map((r) => r.id)).toEqual(["a-1", "a-2"]);
+    expect(inOrder([first, second]).map((r) => r.id)).toEqual(["a-1", "a-2"]);
+  });
+});
