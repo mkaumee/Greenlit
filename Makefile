@@ -161,13 +161,17 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 	@url=$$(gcloud run services describe $(APPROVALS_SERVICE) \
 	          --region=$(REGION) --project=$(PROJECT_ID) \
 	          --format='value(status.url)' 2>/dev/null); \
-	  if [ -z "$$url" ]; then \
-	    echo "could not find the $(APPROVALS_SERVICE) service in $(PROJECT_ID)."; \
-	    echo "  deploy it first:  make deploy PROJECT_ID=$(PROJECT_ID)"; \
+	  api=$$(gcloud run services describe $(API_SERVICE) \
+	          --region=$(REGION) --project=$(PROJECT_ID) \
+	          --format='value(status.url)' 2>/dev/null); \
+	  if [ -z "$$url" ] || [ -z "$$api" ]; then \
+	    echo "could not find $(APPROVALS_SERVICE) and $(API_SERVICE) in $(PROJECT_ID)."; \
+	    echo "  deploy them first:  make deploy PROJECT_ID=$(PROJECT_ID)"; \
 	    exit 2; \
 	  fi; \
 	  echo "  approvals: $$url"; \
-	  cd web && VITE_APPROVALS_URL="$$url" npm run build
+	  echo "  api:       $$api"; \
+	  cd web && VITE_APPROVALS_URL="$$url" VITE_API_URL="$$api" npm run build
 	firebase deploy --only hosting --project $(PROJECT_ID)
 
 # Puts a screenplay into a DEPLOYED project, so the hosted panel has something

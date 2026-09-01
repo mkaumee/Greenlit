@@ -26,9 +26,10 @@ from cinema_contracts import (
     NextMove,
 )
 from cinema_contracts.testing import ScriptedBrain
+from google.auth.exceptions import RefreshError
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
-from orchestrator.mail import InMemoryMailbox, MailTransport
+from orchestrator.mail import InMemoryMailbox, MailTransport, RawInbound
 from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import (
     ItemRecord,
@@ -819,3 +820,103 @@ async def test_research_still_happens_without_a_mailbox(harness: _Harness) -> No
     report = await _unmailed(harness).run_tick(PID)
 
     assert report.items_researched == 1
+
+
+# --------------------------------------------------------------------------- #
+# A mailbox that stopped working
+# --------------------------------------------------------------------------- #
+#
+# Building a transport does not contact Google — the refresh token is only
+# exchanged when it is used — so an expired credential reaches the poll looking
+# healthy. This is the first moment it is discoverable, and if the tick does
+# not record it here the project simply stops moving, indistinguishable from
+# suppliers who have all gone quiet at once.
+
+
+@final
+class _RefusingMailbox:
+    """A producer whose refresh token Google will not honour any more."""
+
+    marked: list[tuple[str, datetime]]
+
+    def __init__(self) -> None:
+        self.marked = []
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return _RefusingTransport()
+
+    async def mark_expired(self, project_id: str, now: datetime) -> None:
+        self.marked.append((project_id, now))
+
+
+@final
+class _RefusingTransport(InMemoryMailbox):
+    @override
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        _ = threads
+        raise RefreshError("invalid_grant")
+
+
+@final
+class _BrokenMailbox:
+    """A transport that fails for some reason that is not expiry."""
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return _TimingOutTransport()
+
+
+@final
+class _TimingOutTransport(InMemoryMailbox):
+    @override
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        _ = threads
+        raise TimeoutError("the network went away")
+
+
+async def test_a_refused_token_is_recorded_against_the_producer(
+    harness: _Harness,
+) -> None:
+    await harness.add_negotiation()
+    mailboxes = _RefusingMailbox()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), mailboxes)
+
+    report = await loop.run_tick(PID)
+
+    assert report.mailbox_missing
+    assert [p for p, _ in mailboxes.marked] == [PID]
+    assert not report.errors, "an expired token is a state, not a failure"
+
+
+async def test_a_refused_token_leaves_the_negotiation_alone(
+    harness: _Harness,
+) -> None:
+    """Nothing can be sent, so nothing should be decided.
+
+    Claiming the row and asking the brain for a counter-offer we cannot deliver
+    would burn a round on a supplier who never heard from us.
+    """
+    await harness.add_negotiation()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), _RefusingMailbox())
+
+    report = await loop.run_tick(PID)
+
+    assert report.negotiations_examined == 0
+    assert report.messages_sent == 0
+
+
+async def test_a_network_failure_is_not_blamed_on_the_producer(
+    harness: _Harness,
+) -> None:
+    """The distinction the whole thing turns on.
+
+    A blip is retried next tick and needs nobody told. Marking it as an expired
+    mailbox would send a producer through a consent screen to fix a problem
+    that had already fixed itself.
+    """
+    await harness.add_negotiation()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), _BrokenMailbox())
+
+    with pytest.raises(TimeoutError):
+        _ = await loop.run_tick(PID)

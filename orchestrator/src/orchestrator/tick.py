@@ -48,7 +48,7 @@ from cinema_contracts import (
 
 from orchestrator.clock import SimClock
 from orchestrator.mail import MailTransport, RawInbound
-from orchestrator.mailboxes import MailboxProvider
+from orchestrator.mailboxes import MailboxProvider, is_expired_credential
 from orchestrator.records import MessageRecord, NegotiationRecord
 from orchestrator.repository import DueNegotiation, FirestoreRepository
 from orchestrator.sourcing import SourcingLoop
@@ -185,8 +185,19 @@ class TickLoop:
             # touches — and only marks read — mail in these conversations, so
             # an agent sharing a mailbox with a human cannot consume their post.
             mine = await self._repo.live_thread_ids(project_id)
-            for raw in await mail.poll(threads=mine):
-                await self._file_reply(project_id, raw, now, report)
+            try:
+                inbound = await mail.poll(threads=mine)
+            except Exception as exc:
+                # The first time a dead credential is discoverable. Building the
+                # transport does not contact Google — the token is only
+                # exchanged when it is used — so an expired refresh token gets
+                # this far looking healthy.
+                if not await self._note_expiry(project_id, exc, now, report):
+                    raise
+                mail = None
+            else:
+                for raw in inbound:
+                    await self._file_reply(project_id, raw, now, report)
 
         # Items first, so a negotiation opened by this pass gets its opening
         # email in the same pass rather than waiting a minute for the next one.
@@ -223,6 +234,34 @@ class TickLoop:
     # ------------------------------------------------------------------ #
     # Inbound
     # ------------------------------------------------------------------ #
+
+    async def _note_expiry(
+        self,
+        project_id: str,
+        error: BaseException,
+        now: datetime,
+        report: TickReport,
+    ) -> bool:
+        """Record a refused credential, and say whether that is what happened.
+
+        Returns False for anything else, so a network blip is re-raised and
+        retried on the next tick rather than being written down as a producer's
+        fault. Telling those two apart is the whole point: an expired token
+        never recovers on its own, and a project that sits still for days with
+        nothing on screen explaining why is the failure this system is least
+        able to see.
+        """
+        if not is_expired_credential(error):
+            return False
+
+        report.mailbox_missing = True
+        recorder = getattr(self._mailboxes, "mark_expired", None)
+        if recorder is not None:
+            # Only ProducerMailboxes can record this; SingleMailbox has no
+            # producer to record it against, and an in-memory mailbox cannot
+            # expire in the first place.
+            await recorder(project_id, now)
+        return True
 
     async def _file_reply(
         self, project_id: str, raw: RawInbound, now: datetime, report: TickReport
@@ -412,6 +451,12 @@ class TickLoop:
             # Threading is built from RFC-822 header ids, never from the
             # transport's own message id. See SentMessage in mail.py for why
             # confusing the two silently shreds the supplier's thread.
+            # Not wrapped in the expiry check: _advance_negotiation runs
+            # inside run_tick's per-negotiation try, which records the failure
+            # against that negotiation and leaves the rest of the project
+            # ticking. Expiry surfaces on the poll above, which every tick does
+            # first and unconditionally — so a dead mailbox is noticed on the
+            # same pass either way, and recording it twice would be noise.
             sent = await mail.send(
                 to=supplier.email,
                 subject=move.draft_subject or f"Regarding {record.item_id}",

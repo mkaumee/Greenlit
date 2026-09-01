@@ -20,10 +20,17 @@ from cinema_contracts import ClockMode, NegotiationState
 from cinema_contracts.testing import ScriptedBrain
 from fastapi import HTTPException
 from google.cloud.firestore_v1 import AsyncClient
-from orchestrator.app import Services, app, build_brain, build_mail, services_of
+from orchestrator.app import (
+    Services,
+    app,
+    build_brain,
+    build_mail,
+    build_mailboxes,
+    services_of,
+)
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
 from orchestrator.mail import InMemoryMailbox
-from orchestrator.mailboxes import SingleMailbox
+from orchestrator.mailboxes import ProducerMailboxes, SingleMailbox
 from orchestrator.records import (
     ItemRecord,
     NegotiationRecord,
@@ -488,3 +495,40 @@ def test_the_scripted_brain_needs_no_keys(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert isinstance(build_brain(settings), ScriptedBrain)
+
+
+# --------------------------------------------------------------------------- #
+# The wiring itself
+# --------------------------------------------------------------------------- #
+
+
+def test_real_mail_means_each_producer_sends_from_their_own_mailbox(
+    firestore: AsyncClient,
+) -> None:
+    """Guards the bug this test was written after.
+
+    ProducerMailboxes was built, tested and never wired in: build_services
+    passed SingleMailbox unconditionally, so the whole per-producer feature
+    could not affect a single tick. Every unit test still passed, because they
+    all tested the class rather than its use. Code that looks finished and does
+    nothing is worse than code that is obviously missing.
+    """
+    live = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        mail_backend=MailBackend.GMAIL,
+    )
+
+    provider = build_mailboxes(live, FirestoreRepository(firestore), InMemoryMailbox())
+
+    assert isinstance(provider, ProducerMailboxes)
+
+
+def test_memory_mail_keeps_one_mailbox_for_everything(
+    firestore: AsyncClient,
+) -> None:
+    """So make e2e and every test run the path the real provider runs."""
+    provider = build_mailboxes(
+        SETTINGS, FirestoreRepository(firestore), InMemoryMailbox()
+    )
+
+    assert isinstance(provider, SingleMailbox)

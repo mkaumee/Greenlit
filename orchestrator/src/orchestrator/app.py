@@ -47,7 +47,11 @@ from orchestrator.clock import SimClock, initial_state
 from orchestrator.gmail import GmailTransport, build_credentials, token_store_for
 from orchestrator.logs import configure_logging
 from orchestrator.mail import InMemoryMailbox, MailTransport
-from orchestrator.mailboxes import SingleMailbox
+from orchestrator.mailboxes import (
+    MailboxProvider,
+    ProducerMailboxes,
+    SingleMailbox,
+)
 from orchestrator.records import ItemRecord, ItemStatus, ProjectRecord
 from orchestrator.repository import FirestoreRepository
 from orchestrator.settings import BrainBackend, MailBackend, Settings
@@ -78,7 +82,13 @@ class Services:
 
 
 def build_mail(settings: Settings) -> MailTransport:
-    """Pick a transport. Memory unless someone asked for the real thing."""
+    """The single shared transport. Memory unless someone asked for the real one.
+
+    Still here because the smoke check and the in-memory path both want one
+    mailbox, and because ``SingleMailbox`` wraps whatever this returns. What
+    changed is that the tick loop no longer receives it directly — see
+    ``build_mailboxes``.
+    """
     if settings.mail_backend is MailBackend.GMAIL:
         credentials = build_credentials(
             token_store_for(settings),
@@ -87,6 +97,28 @@ def build_mail(settings: Settings) -> MailTransport:
         )
         return GmailTransport.from_credentials(credentials, settings)
     return InMemoryMailbox()
+
+
+def build_mailboxes(
+    settings: Settings, repo: FirestoreRepository, fallback: MailTransport
+) -> MailboxProvider:
+    """Which mailbox each project sends from.
+
+    With real mail on, every project sends from the Gmail its own producer
+    connected — that is the product, and it is why a supplier hears from a
+    person at a production rather than from a robot at a vendor.
+
+    With mail off, one in-memory mailbox serves everything, so ``make e2e`` and
+    every test run the same code path the real provider does.
+
+    This function existing at all is the fix for a real bug: ``ProducerMailboxes``
+    was written, tested, and never wired in, so the whole per-producer feature
+    could not affect a single tick. Built code that looks finished and does
+    nothing is worse than code that is obviously missing.
+    """
+    if settings.mail_backend is MailBackend.GMAIL:
+        return ProducerMailboxes(repo, settings)
+    return SingleMailbox(fallback)
 
 
 def _gemini_credentials() -> str:
@@ -203,7 +235,7 @@ def build_services(settings: Settings | None = None) -> Services:
         clock=clock,
         brain=brain,
         mail=mail,
-        loop=TickLoop(repo, clock, brain, SingleMailbox(mail)),
+        loop=TickLoop(repo, clock, brain, build_mailboxes(resolved, repo, mail)),
     )
 
 
