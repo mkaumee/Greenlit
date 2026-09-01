@@ -37,7 +37,6 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY contracts/pyproject.toml contracts/
 COPY orchestrator/pyproject.toml orchestrator/
-COPY supplier-sim/pyproject.toml supplier-sim/
 COPY main-agent/pyproject.toml main-agent/
 RUN uv sync --frozen --no-dev --no-install-workspace --package orchestrator
 
