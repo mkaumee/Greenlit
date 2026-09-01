@@ -69,8 +69,30 @@ export interface DecisionRow {
   roundsUsed: number;
   reason: string;
   reasoning: string;
+  /** How many other suppliers quoted for the same prop and were not chosen.
+   * Worth saying: approving is keyed by item, so it settles all of them. */
+  rivals: number;
   at: Date;
 }
+
+/**
+ * Which way an email went.
+ *
+ * Case-insensitive because Firestore holds the contract enum's own spelling,
+ * `INBOUND` / `OUTBOUND`, and an earlier version of this compared against
+ * `"inbound"` — so every supplier reply in the transcript was labelled as
+ * something the agent had sent. Nothing threw and nothing looked broken; the
+ * transcript simply stopped being a record of a conversation and became a list
+ * of outgoing mail. Exactly the failure this file's own comments warn about,
+ * which is why the comparison is now a named function with a test rather than
+ * an inline `===`.
+ *
+ * Anything unrecognised is outbound: an unlabelled message is far more likely
+ * to be one of ours than a reply, and claiming a seller said something they
+ * did not is the worse mistake.
+ */
+export const directionOf = (value: string | undefined): "inbound" | "outbound" =>
+  value?.toLowerCase() === "inbound" ? "inbound" : "outbound";
 
 export type Row = ProducerRow | BriefingRow | ActivityRow | DecisionRow;
 

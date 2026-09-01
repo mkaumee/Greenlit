@@ -97,6 +97,7 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
               rounds: row.roundsUsed,
               reason: row.reason,
               reasoning: row.reasoning,
+              rivals: row.rivals,
             },
             approval: { id: row.negotiationId },
           },

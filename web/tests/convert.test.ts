@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DECISION_TOOL, EMAIL_TOOL, toThreadMessage } from "../src/chat/convert";
-import { inOrder, type Row } from "../src/chat/rows";
+import { directionOf, inOrder, type Row } from "../src/chat/rows";
 
 const AT = new Date("2026-03-01T09:00:00Z");
 
@@ -136,5 +136,27 @@ describe("order", () => {
 
     expect(inOrder([second, first]).map((r) => r.id)).toEqual(["a-1", "a-2"]);
     expect(inOrder([first, second]).map((r) => r.id)).toEqual(["a-1", "a-2"]);
+  });
+});
+
+describe("directionOf", () => {
+  it("reads the spelling Firestore actually holds", () => {
+    // The contract enum is INBOUND/OUTBOUND and that is what is stored. An
+    // earlier version compared against "inbound", so every supplier reply in
+    // the transcript was labelled as mail the agent had sent — silently, and
+    // for as long as nobody read the screen.
+    expect(directionOf("INBOUND")).toBe("inbound");
+    expect(directionOf("OUTBOUND")).toBe("outbound");
+  });
+
+  it("still reads the lowercase form", () => {
+    expect(directionOf("inbound")).toBe("inbound");
+  });
+
+  it("treats an unlabelled message as ours", () => {
+    // Claiming a seller said something they did not is the worse mistake of
+    // the two, so the unknown case is outbound.
+    expect(directionOf(undefined)).toBe("outbound");
+    expect(directionOf("")).toBe("outbound");
   });
 });

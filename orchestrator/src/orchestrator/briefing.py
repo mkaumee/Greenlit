@@ -27,6 +27,10 @@ Referenced = tuple[str, str, str]
 
 _DEAD = {"DEAD", "ORDERED"}
 
+_DEAREST = float("inf")
+"""Where a supplier who never named a price sorts. Not zero: an absent quote
+must never win a cheapest-first comparison by being absent from it."""
+
 
 def _money(amount: Money | None) -> str:
     return "—" if amount is None else f"{amount.currency} {amount.amount:,}"
@@ -61,19 +65,38 @@ def summarise(digest: ProjectDigest, question: str) -> tuple[str, list[Reference
 
 
 def _waiting(digest: ProjectDigest) -> tuple[str, list[Referenced]]:
+    """One line per prop, and the cheapest quote leads.
+
+    Listing every waiting negotiation would name the same cup three times at
+    three prices, which is both a longer answer and a worse one: a purchase
+    order is keyed by the item, so approving any of them settles the rest.
+    The dearer quotes are worth a mention — a producer should know somebody
+    else answered — but they are not separate decisions, and the panel does
+    not present them as such either.
+    """
     waiting = [n for n in digest.negotiations if n.waiting_on_human]
     if not waiting:
         return ("Nothing needs you right now.", [])
 
-    lines = [f"{len(waiting)} decision(s) waiting on you:"]
-    refs: list[Referenced] = []
+    by_item: dict[str, list[NegotiationLine]] = {}
     for n in waiting:
-        why = n.escalation_reason or "the agent stopped here"
-        lines.append(
-            f"  · {n.item_name} — {n.supplier} at {_money(n.latest_quote)} "
-            f"after {n.rounds_used} round(s). {why}."
+        by_item.setdefault(n.item_id, []).append(n)
+
+    lines = [f"{len(by_item)} decision(s) waiting on you:"]
+    refs: list[Referenced] = []
+    for _, group in sorted(by_item.items()):
+        chosen, *rivals = sorted(
+            group, key=lambda n: n.latest_quote.amount if n.latest_quote else _DEAREST
         )
-        refs.append(("negotiation", n.negotiation_id, n.item_name))
+        why = chosen.escalation_reason or "the agent stopped here"
+        line = (
+            f"  · {chosen.item_name} — {chosen.supplier} at "
+            f"{_money(chosen.latest_quote)} after {chosen.rounds_used} round(s). {why}."
+        )
+        if rivals:
+            line += f" {len(rivals)} dearer quote(s) for the same prop."
+        lines.append(line)
+        refs.append(("negotiation", chosen.negotiation_id, chosen.item_name))
     lines.append("\nNothing is bought until you approve it.")
     return ("\n".join(lines), refs)
 

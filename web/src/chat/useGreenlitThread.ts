@@ -19,10 +19,9 @@ import { useCallback, useMemo, useState } from "react";
 
 import type { Item, Message, Negotiation, Supplier } from "@/hooks/useProject";
 import { ask } from "./api";
+import { decisionsFor } from "./decisions";
 import { toThreadMessage } from "./convert";
-import { inOrder, type Row } from "./rows";
-
-const WAITING = "READY_FOR_HUMAN";
+import { directionOf, inOrder, type Row } from "./rows";
 
 const money = (q: Negotiation["latest_quote"]): string => {
   const price = q?.unit_price ?? q?.total;
@@ -79,7 +78,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
           kind: "activity",
           id: `${negotiation.id}:${message.id}`,
           negotiationId: negotiation.id,
-          direction: message.direction === "inbound" ? "inbound" : "outbound",
+          direction: directionOf(message.direction),
           supplier: named(negotiation.supplier_id),
           itemName: itemNamed(negotiation.item_id),
           subject: message.subject ?? "",
@@ -91,24 +90,32 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     return rows;
   }, [sources.negotiations, sources.messages, named, itemNamed]);
 
+  // One row per prop, not per negotiation. The agent approaches several
+  // suppliers for the same item, so `READY_FOR_HUMAN` can be true of three at
+  // once — and `purchase_orders` is keyed by the item, meaning approving any
+  // one of them makes the others unapprovable. Offering all three as separate
+  // decisions would put an Approve button under the expensive quote sitting
+  // beside the cheap one. `decisionsFor` picks the cheapest and demotes the
+  // rest, which is the rule the Inbox already used.
   const waiting = useMemo<Row[]>(
     () =>
-      sources.negotiations
-        .filter((n) => n.state === WAITING)
-        .map((n) => ({
+      decisionsFor(sources.items, sources.negotiations).map(
+        ({ item, chosen, rivals }) => ({
           kind: "decision" as const,
-          id: `decision:${n.id}`,
-          negotiationId: n.id,
-          itemId: n.item_id ?? "",
-          itemName: itemNamed(n.item_id),
-          supplier: named(n.supplier_id),
-          price: money(n.latest_quote),
-          roundsUsed: n.rounds_used ?? 0,
-          reason: n.escalation_reason ?? "",
-          reasoning: n.latest_reasoning ?? "",
-          at: n.last_inbound_at?.toDate() ?? new Date(),
-        })),
-    [sources.negotiations, named, itemNamed],
+          id: `decision:${chosen.id}`,
+          negotiationId: chosen.id,
+          itemId: item.id,
+          itemName: item.name ?? item.id,
+          supplier: named(chosen.supplier_id),
+          price: money(chosen.latest_quote),
+          roundsUsed: chosen.rounds_used ?? 0,
+          reason: chosen.escalation_reason ?? "",
+          reasoning: chosen.latest_reasoning ?? "",
+          rivals: rivals.length,
+          at: chosen.last_inbound_at?.toDate() ?? new Date(),
+        }),
+      ),
+    [sources.items, sources.negotiations, named],
   );
 
   const rows = useMemo(

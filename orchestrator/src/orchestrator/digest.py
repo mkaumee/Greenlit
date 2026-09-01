@@ -83,7 +83,16 @@ class ProjectDigest:
 
     @property
     def waiting_count(self) -> int:
-        return sum(1 for n in self.negotiations if n.waiting_on_human)
+        """How many *props* need a person, not how many negotiations do.
+
+        The agent writes to several suppliers about the same item, so three
+        negotiations can sit at ``READY_FOR_HUMAN`` for one cup. A purchase
+        order is created keyed by the item, so approving any one of them
+        settles all three — meaning the producer has one decision to make, not
+        three. Counting negotiations would tell them eight when the panel,
+        which groups the same way, says four.
+        """
+        return len({n.item_id for n in self.negotiations if n.waiting_on_human})
 
     def known_ids(self) -> frozenset[str]:
         """Every id a briefing is allowed to mention.

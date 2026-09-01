@@ -16,6 +16,7 @@
 import { useState } from "react";
 
 import { approve, setFloor, type Outcome } from "@/approvals";
+import { decisionsFor as pending, type Decision } from "@/chat/decisions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,11 +30,7 @@ import { Separator } from "@/components/ui/separator";
 import type { Item, Negotiation } from "@/hooks/useProject";
 import { money, saving, simTime } from "@/lib/format";
 
-interface Decision {
-  item: Item;
-  chosen: Negotiation;
-  rivals: Negotiation[];
-}
+
 
 export function Inbox({
   projectId,
@@ -268,26 +265,3 @@ function Result({ outcome }: { outcome: Outcome }) {
  * the rest are shown as context — which also makes it visible that ordering
  * the same item twice is a thing the system refuses.
  */
-function pending(items: Item[], negotiations: Negotiation[]): Decision[] {
-  const ready = negotiations.filter((n) => n.state === "READY_FOR_HUMAN");
-  const byItem = new Map<string, Negotiation[]>();
-  for (const n of ready) {
-    if (n.item_id === undefined) continue;
-    byItem.set(n.item_id, [...(byItem.get(n.item_id) ?? []), n]);
-  }
-
-  const out: Decision[] = [];
-  for (const [itemId, group] of byItem) {
-    const item = items.find((i) => i.id === itemId);
-    if (item === undefined || item.status === "ORDERED") continue;
-    const sorted = [...group].sort(
-      (a, b) =>
-        (a.latest_quote?.unit_price?.amount ?? Infinity) -
-        (b.latest_quote?.unit_price?.amount ?? Infinity),
-    );
-    const [chosen, ...rivals] = sorted;
-    if (chosen === undefined) continue;
-    out.push({ item, chosen, rivals });
-  }
-  return out.sort((a, b) => (a.item.name ?? "").localeCompare(b.item.name ?? ""));
-}
