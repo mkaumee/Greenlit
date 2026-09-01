@@ -31,8 +31,9 @@ code, and worth doing once before running it against a deployment.
 """
 
 # argparse Namespace attributes are Any by nature; the values are str()'d at
-# the one place they are used, which is the check that matters.
-# pyright: reportAny=false
+# the one place they are used, which is the check that matters. The Firestore
+# client ships no types for `update`, same as in repository.py.
+# pyright: reportAny=false, reportUnknownMemberType=false
 import argparse
 import asyncio
 import os
@@ -67,7 +68,9 @@ async def claim(
             "  If that is genuinely what you want:  --force"
         )
 
-    await client.collection("projects").document(pid).update({"owner_uid": owner_uid})
+    _ = await (
+        client.collection("projects").document(pid).update({"owner_uid": owner_uid})
+    )
     return 0, (
         f"'{pid}' ({record.title}) now belongs to {owner_uid}.\n"
         "  That account sees it on next snapshot — no reload needed."

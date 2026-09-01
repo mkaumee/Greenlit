@@ -17,6 +17,7 @@ import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
 import type { User } from "@/firebase";
 import { useItems, useNegotiations, useProjects, useSuppliers } from "@/hooks/useProject";
 import { Breakdown } from "@/screens/Breakdown";
+import { Chat } from "@/screens/Chat";
 import { DebugPanel } from "@/screens/DebugPanel";
 import { Inbox } from "@/screens/Inbox";
 import { Savings } from "@/screens/Savings";
@@ -86,6 +87,65 @@ function SignedIn({ user }: { user: User }) {
   ).size;
 
   return (
+    <Routes>
+      {/* The chat is the whole window: three columns, its own scrolling, no
+          page chrome around it. The older tabbed screens keep their routes so
+          nothing that worked is lost while this settles, and they still carry
+          the header below. */}
+      <Route
+        path="/"
+        element={
+          <Chat
+            user={user}
+            projectId={projectId}
+            projectIds={ids}
+            onPickProject={setChosen}
+            items={items}
+            negotiations={negotiations}
+            suppliers={suppliers}
+            supplierName={supplierName}
+          />
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <Panels
+            user={user}
+            ids={ids}
+            projectId={projectId}
+            setChosen={setChosen}
+            items={items}
+            negotiations={negotiations}
+            supplierName={supplierName}
+            waiting={waiting}
+          />
+        }
+      />
+    </Routes>
+  );
+}
+
+function Panels({
+  user,
+  ids,
+  projectId,
+  setChosen,
+  items,
+  negotiations,
+  supplierName,
+  waiting,
+}: {
+  user: User;
+  ids: string[];
+  projectId: string;
+  setChosen: (id: string) => void;
+  items: ReturnType<typeof useItems>["rows"];
+  negotiations: ReturnType<typeof useNegotiations>["rows"];
+  supplierName: (id: string | undefined) => string;
+  waiting: number;
+}) {
+  return (
     <div className="mx-auto max-w-5xl px-6 py-8">
       <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -116,7 +176,8 @@ function SignedIn({ user }: { user: User }) {
       </header>
 
       <nav className="mb-8 flex gap-1 border-b">
-        <Tab to="/" label="Needs you" count={waiting} />
+        <Tab to="/" label="Chat" count={waiting} />
+        <Tab to="/inbox" label="Needs you" />
         <Tab to="/breakdown" label="Breakdown" />
         <Tab to="/savings" label="Savings" />
         <Tab to="/debug" label="Debug" />
@@ -124,7 +185,7 @@ function SignedIn({ user }: { user: User }) {
 
       <Routes>
         <Route
-          path="/"
+          path="/inbox"
           element={
             <Inbox
               projectId={projectId}

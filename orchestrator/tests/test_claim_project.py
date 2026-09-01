@@ -12,7 +12,8 @@ from datetime import UTC, datetime
 from cinema_contracts import ClockMode
 from claim_project import claim
 from google.cloud.firestore_v1 import AsyncClient
-from orchestrator.records import ClockState, ProjectRecord
+from orchestrator.clock import ClockState
+from orchestrator.records import ProjectRecord
 from orchestrator.repository import FirestoreRepository
 
 T0 = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
