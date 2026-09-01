@@ -92,3 +92,50 @@ export async function ask(projectId: string, question: string): Promise<Answer> 
 
 const describe = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
+
+export type Consent =
+  | { kind: "ready"; authorizeUrl: string }
+  | { kind: "error"; detail: string };
+
+/**
+ * Ask `cinema-api` for a consent URL.
+ *
+ * The URL is opened in a popup by the caller rather than redirected to from
+ * here, so the panel stays where it is: the callback page closes itself and
+ * the `mailboxes/{uid}` snapshot is what flips the card. Nothing is posted
+ * back, and nothing polls.
+ */
+export async function startConsent(): Promise<Consent> {
+  const url = base();
+  if (url === "") {
+    return {
+      kind: "error",
+      detail:
+        "VITE_API_URL was not set when this was built, so there is nowhere " +
+        "to ask for a consent URL. `make deploy-web` fills it in.",
+    };
+  }
+
+  const user = auth.currentUser;
+  if (user === null) return { kind: "error", detail: "Sign in first." };
+
+  try {
+    const response = await fetch(`${url}/mailbox/start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await user.getIdToken()}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!response.ok) {
+      return { kind: "error", detail: `${response.status} ${await response.text()}` };
+    }
+    const body = (await response.json()) as { authorize_url: string };
+    return { kind: "ready", authorizeUrl: body.authorize_url };
+  } catch (cause) {
+    return {
+      kind: "error",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
+}
