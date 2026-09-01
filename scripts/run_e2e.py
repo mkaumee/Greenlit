@@ -76,11 +76,12 @@ HOURS_PER_TICK = 3
 
 
 class Persona:
-    """A scripted seller. Enough to exercise the loop, not the real simulator.
+    """A scripted seller. Enough to exercise the loop, and no more.
 
-    The real adversary will live in ``supplier-sim/`` as a separate service
-    with its own mailbox and Gemini writing every reply. This is the cheap
-    version that runs without a network, so the daily check stays ten minutes.
+    An LLM-backed adversary with its own mailbox was planned and is not built:
+    with a real brain, real mail and a real deployment there is nothing left
+    for it to prove. This is the cheap version that runs without a network, so
+    the daily check stays ten minutes.
     """
 
     name: str

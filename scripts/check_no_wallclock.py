@@ -28,7 +28,7 @@ ALLOWED: frozenset[Path] = frozenset(
 )
 """The clock implementation is the one sanctioned reader of real time."""
 
-SEARCH_DIRS = ("contracts", "orchestrator", "supplier-sim", "main-agent", "scripts")
+SEARCH_DIRS = ("contracts", "orchestrator", "main-agent", "scripts")
 
 DATETIME_ATTRS = frozenset({"now", "utcnow", "today"})
 TIME_ATTRS = frozenset({"time", "monotonic", "perf_counter", "time_ns", "monotonic_ns"})

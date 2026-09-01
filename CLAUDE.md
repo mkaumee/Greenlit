@@ -65,12 +65,10 @@ screenplay ──> extract_props ──> research_item ──> negotiate over Gm
 | `contracts/`     | shared  | The A/B interface. Changes require both sides to agree.       |
 | `main-agent/`    | Role A  | The brain. LLM reasoning only, as pure functions.             |
 | `orchestrator/`  | Role B  | Clock, Firestore, Gmail, state machine, tick loop, approvals. |
-| `supplier-sim/`  | Role B  | Adversary simulator. A later test fixture, not product code.  |
 | `web/`           | Role B  | React + Vite + TypeScript front end.                          |
 
 Role A implements the four Protocol signatures in `contracts/`. Role A does not
-touch Firestore, Gmail, or the clock. Role B does not make LLM calls except
-inside `supplier-sim/`.
+touch Firestore, Gmail, or the clock. Role B does not make LLM calls at all.
 
 ## Hard Rules
 
