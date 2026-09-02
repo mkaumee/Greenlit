@@ -16,15 +16,19 @@ another producer's account — or has the agent send as them.
 
 import base64
 from datetime import UTC, datetime, timedelta
+from typing import cast, final
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 from cinema_contracts import (
+    AgentBrain,
     ClockMode,
     ExtractedQuote,
     Money,
     NegotiationState,
+    ProducerBriefing,
+    ProducerQuestion,
     SceneMention,
 )
 from cinema_contracts.testing import ScriptedBrain
@@ -315,9 +319,17 @@ async def _owned_project(
     return repo
 
 
-async def test_chat_answers_from_stored_facts(
+async def test_chat_answers_about_the_production(
     api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
 ) -> None:
+    """The default wiring: the brain answers, and every reference is real.
+
+    This asserted the deterministic summary until the brain was wired in.
+    Stored facts are now the fallback rather than the default, and that path
+    has its own test — what belongs here is that the ordinary path works and
+    that `waiting_on_you` is right however the prose was produced, because the
+    rail and the inspector read that number too.
+    """
     owner = tokens.create("owner@example.invalid")
     headers = {
         "Authorization": f"Bearer {tokens.grant(owner, 'owner@example.invalid')}"
@@ -332,10 +344,11 @@ async def test_chat_answers_from_stored_facts(
         )
     ).json()
 
+    assert body["source"] == "agent"
     assert body["waiting_on_you"] == 1
-    assert "Ah Seng Rentals" in body["text"]
-    assert "719" in body["text"]
-    assert [r["id"] for r in body["references"]] == ["neg1"]
+    assert body["text"].strip()
+    # Nothing invented: the digest is the boundary, and it carried these.
+    assert {r["id"] for r in body["references"]} <= {"mirror", "neg1"}
 
 
 async def test_chat_refuses_another_producers_project(
@@ -603,3 +616,179 @@ async def test_an_empty_script_is_refused(
     )
 
     assert reply.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# The brain answering, and being checked
+# --------------------------------------------------------------------------- #
+
+
+@final
+class _Briefer:
+    """A brain whose brief_producer says whatever a test wants."""
+
+    _briefing: ProducerBriefing | None
+    asked: list[ProducerQuestion]
+
+    def __init__(self, briefing: ProducerBriefing | None = None) -> None:
+        self._briefing = briefing
+        self.asked = []
+
+    def __getattr__(self, name: str) -> object:
+        # Everything except brief_producer comes from the scripted brain, so a
+        # test about briefing does not have to care about the other four.
+        return getattr(ScriptedBrain(), name)
+
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        self.asked.append(question)
+        if self._briefing is None:
+            raise RuntimeError("the model is down")
+        return self._briefing
+
+
+def _with_brain(firestore: AsyncClient, brain: object) -> None:
+    repo = FirestoreRepository(firestore)
+    app.state.services = ApiServices(
+        settings=SETTINGS,
+        client=firestore,
+        repo=repo,
+        clock=SimClock(repo),
+        brain=cast(AgentBrain, brain),
+    )
+
+
+async def _ask(
+    api: httpx.AsyncClient, tokens: TokenMinter, firestore: AsyncClient
+) -> tuple[dict[str, str], str]:
+    owner = tokens.create("owner@example.invalid")
+    headers = {
+        "Authorization": f"Bearer {tokens.grant(owner, 'owner@example.invalid')}"
+    }
+    _ = await _owned_project(firestore, "kopitiam", owner)
+    return headers, "kopitiam"
+
+
+async def test_a_briefing_is_labelled_as_the_agent(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(
+        firestore,
+        _Briefer(
+            ProducerBriefing(
+                text="Skyline is worth one more push.",
+                referenced_negotiation_ids=["neg1"],
+            )
+        ),
+    )
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "should I push?"},
+        )
+    ).json()
+
+    assert body["source"] == "agent"
+    assert body["text"] == "Skyline is worth one more push."
+    assert [r["id"] for r in body["references"]] == ["neg1"]
+
+
+async def test_an_invented_reference_is_dropped_not_rendered(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """The reason the digest was built as a boundary.
+
+    A link to a prop that does not exist is worse than no link: a producer
+    clicking it learns the agent is unreliable, having been given no way to
+    tell which of the other statements were also invented. The prose still
+    stands — a briefing that cites one bad id is usually right about the rest.
+    """
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(
+        firestore,
+        _Briefer(
+            ProducerBriefing(
+                text="Two suppliers are worth chasing.",
+                referenced_item_ids=["mirror", "ghost-prop"],
+                referenced_negotiation_ids=["neg1", "neg-that-never-was"],
+            )
+        ),
+    )
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "who is quiet?"},
+        )
+    ).json()
+
+    assert body["source"] == "agent"
+    assert body["text"] == "Two suppliers are worth chasing."
+    assert sorted(r["id"] for r in body["references"]) == ["mirror", "neg1"]
+
+
+async def test_a_failing_brain_falls_back_and_says_so(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Both answers are true; only one reasoned.
+
+    A silent fallback would leave a deployment whose brain is misconfigured
+    looking exactly like one where it is not, and finding that out by noticing
+    the prose feels flat is not a diagnosis.
+    """
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(firestore, _Briefer(None))
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "what needs me?"},
+        )
+    ).json()
+
+    assert body["source"] == "stored-facts"
+    # Still a real answer, read from Firestore rather than reasoned about.
+    assert "Ah Seng Rentals" in body["text"]
+    assert body["waiting_on_you"] == 1
+
+
+async def test_an_empty_briefing_falls_back_rather_than_saying_nothing(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(firestore, _Briefer(ProducerBriefing(text="   ")))
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "what needs me?"},
+        )
+    ).json()
+
+    assert body["source"] == "stored-facts"
+    assert body["text"].strip()
+
+
+async def test_the_brain_is_only_handed_the_producers_own_production(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """The digest is the boundary: what is not in it cannot be talked about."""
+    headers, project_id = await _ask(api, tokens, firestore)
+    brain = _Briefer(ProducerBriefing(text="Fine."))
+    _with_brain(firestore, brain)
+
+    _ = await api.post(
+        "/chat",
+        headers=headers,
+        json={"project_id": project_id, "question": "how are we doing?"},
+    )
+
+    assert len(brain.asked) == 1
+    question = brain.asked[0]
+    assert question.project_id == project_id
+    assert {n.negotiation_id for n in question.negotiations} == {"neg1"}

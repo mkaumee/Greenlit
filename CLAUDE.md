@@ -67,7 +67,7 @@ screenplay ──> extract_props ──> research_item ──> negotiate over Gm
 | `orchestrator/`  | Role B  | Clock, Firestore, Gmail, state machine, tick loop, approvals. |
 | `web/`           | Role B  | React + Vite + TypeScript front end.                          |
 
-Role A implements the four Protocol signatures in `contracts/`. Role A does not
+Role A implements the five Protocol signatures in `contracts/`. Role A does not
 touch Firestore, Gmail, or the clock. Role B does not make LLM calls at all.
 
 ## Hard Rules

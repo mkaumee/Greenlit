@@ -3,7 +3,7 @@
 The interface between Role A (the brain) and Role B (the runtime). Both sides
 import this package. Neither side imports the other.
 
-## The four signatures
+## The five signatures
 
 Role A implements `AgentBrain` in `main-agent`:
 
@@ -13,9 +13,15 @@ Role A implements `AgentBrain` in `main-agent`:
 | `research_item(brief) -> ItemResearch` | B calls A | Reference price band with sources, plus supplier candidates |
 | `extract_quote(message) -> QuoteExtraction` | B calls A | Read a supplier reply, or refuse to and escalate |
 | `next_move(ctx) -> NextMove` | B calls A | Decide the next action and write any email it needs |
+| `brief_producer(question) -> ProducerBriefing` | B calls A | Answer a producer about their own production |
 
-All four are `async`. All four are pure with respect to our systems: the brain
+All five are `async`. All five are pure with respect to our systems: the brain
 reads no Firestore, sends no mail, and holds no memory between calls.
+
+`brief_producer` is the only one whose output is read by a person rather than
+acted on, which makes it the easiest to be quietly wrong in. Everything it may
+mention is in the question it is handed, and B checks every id that comes back
+against the ones it sent — an invented one is dropped rather than rendered.
 
 ## The five data shapes
 

@@ -24,6 +24,8 @@ from cinema_contracts.models import (
     ItemResearch,
     NegotiationContext,
     NextMove,
+    ProducerBriefing,
+    ProducerQuestion,
     PropDraft,
     QuoteExtraction,
     ReferenceBand,
@@ -298,4 +300,36 @@ class ScriptedBrain:
             target_price=target,
             suggest_next_check_in_sim_hours=24.0,
             confidence=0.6,
+        )
+
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        """A count, and nothing that sounds like judgement.
+
+        Deliberately flat. The fake exists so the pipeline has something honest
+        to run on offline, and a stand-in that produced plausible advice would
+        be worse than useless here: the whole point of the real method is
+        judgement, and a fake one is indistinguishable from a real one until
+        somebody acts on it.
+
+        Every id it cites comes from the question, so the caller's reference
+        check has something true to pass on.
+        """
+        waiting = [n for n in question.negotiations if n.waiting_on_human]
+        headline = (
+            f"{question.title}: {len(question.items)} prop(s), "
+            f"{len(question.negotiations)} negotiation(s), "
+            f"{len(waiting)} waiting on you."
+        )
+        lines = [headline]
+        lines.extend(
+            f"  · {n.item_name} — {n.supplier} at {n.latest_quote or 'no price yet'}"
+            for n in waiting
+        )
+        lines.append("(Scripted brain: this is a count, not advice.)")
+
+        return ProducerBriefing(
+            text="\n".join(lines),
+            referenced_item_ids=[i.item_id for i in question.items],
+            referenced_negotiation_ids=[n.negotiation_id for n in waiting],
+            confidence=0.3,
         )

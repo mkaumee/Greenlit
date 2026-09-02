@@ -1,4 +1,4 @@
-"""The four signatures. This is the whole Role A / Role B interface.
+"""The five signatures. This is the whole Role A / Role B interface.
 
 Role A implements ``AgentBrain``. Role B imports the protocol, never the
 implementation, and passes a fake in tests. That is what lets both halves be
@@ -10,7 +10,7 @@ Firestore, does not touch Gmail, does not know what time it is, and keeps no
 memory between calls. If a decision needs a fact, that fact belongs in
 ``NegotiationContext`` and adding it is a two-person change.
 
-All four methods are ``async`` because all four make network-bound LLM calls.
+All five methods are ``async`` because all five make network-bound LLM calls.
 """
 
 from typing import Protocol, runtime_checkable
@@ -21,6 +21,8 @@ from cinema_contracts.models import (
     ItemResearch,
     NegotiationContext,
     NextMove,
+    ProducerBriefing,
+    ProducerQuestion,
     PropDraft,
     QuoteExtraction,
     ScriptSource,
@@ -110,5 +112,35 @@ class AgentBrain(Protocol):
         Return ``WAIT`` when the right answer is to do nothing yet; the tick
         loop will come back. Returning ``WAIT`` forever is caught by
         ``max_rounds`` and escalated by Role B.
+        """
+        ...
+
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        """Answer a producer asking about their own production.
+
+        The only method here that talks to a person rather than about one, and
+        the only one whose output is read rather than acted on. That makes it
+        the safest of the five and the easiest to be quietly wrong in: a
+        confident sentence about a supplier who does not exist reads exactly
+        like a confident sentence about one who does.
+
+        So: **answer only from what is in the question.** Every item and every
+        negotiation the producer may be told about is in there, and Role B
+        checks each id that comes back against the ones it sent. An id that was
+        not in the question is dropped rather than rendered, which is a link
+        that silently disappears — better than a link to nothing, and worse
+        than not inventing it.
+
+        Say you do not know. "No supplier has quoted for the mirror yet" is a
+        good answer. Estimating what one might quote is not, because a producer
+        reading it has no way to tell the two apart.
+
+        This is the place for judgement the deterministic path cannot offer —
+        whether a price is worth pushing on, whether a supplier's silence is
+        worth chasing, what to do first. Counting things is not judgement:
+        Role B already has the numbers and does not need them re-derived.
+
+        ``ProducerBriefing`` carries prose and ids. Nothing on it causes a
+        write, so this cannot spend money however wrong it is.
         """
         ...

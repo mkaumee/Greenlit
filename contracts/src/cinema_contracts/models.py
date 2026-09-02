@@ -321,3 +321,81 @@ class NextMove(_Frozen):
                 f"{self.action} stops the negotiation for a human, so it must say "
                 f"why. Use GOOD_QUOTE when the negotiation simply succeeded."
             )
+
+
+# --------------------------------------------------------------------------- #
+# Talking to a producer
+# --------------------------------------------------------------------------- #
+
+
+class BriefingItem(_Frozen):
+    """One prop, flattened for a question about the production."""
+
+    item_id: str
+    name: str
+    status: str
+    qty: int = Field(ge=0, default=1)
+    best_quote: Money | None = None
+    reference_low: Money | None = None
+    reference_high: Money | None = None
+    script_line: str = Field(
+        default="",
+        description=(
+            "The line it was found in. The receipt, and the reason a producer "
+            "can check the agent rather than trust it."
+        ),
+    )
+
+
+class BriefingNegotiation(_Frozen):
+    """One negotiation, flattened for the same."""
+
+    negotiation_id: str
+    item_id: str
+    item_name: str
+    supplier: str
+    state: NegotiationState
+    rounds_used: int = Field(ge=0, default=0)
+    max_rounds: int = Field(ge=1, default=4)
+    first_quote: Money | None = None
+    latest_quote: Money | None = None
+    reasoning: str = Field(
+        default="",
+        description="The brain's own last explanation, so a briefing can say why.",
+    )
+    waiting_on_human: bool = False
+    escalation_reason: str = ""
+
+
+class ProducerQuestion(_Frozen):
+    """Everything the brain may draw on when answering a producer, and nothing else.
+
+    The digest is a boundary, not a convenience. Whatever is not in here cannot
+    be talked about, and the briefing that comes back is checked against the ids
+    it carried — so a model that invents a supplier or a prop is caught by
+    comparison rather than trusted. Handing over the raw collections would make
+    that check meaningless.
+
+    It is also the same data the panel reads, so the chat and the screens cannot
+    disagree about what is true.
+    """
+
+    project_id: str
+    title: str
+    question: str
+    items: list[BriefingItem] = Field(default_factory=list)
+    negotiations: list[BriefingNegotiation] = Field(default_factory=list)
+
+
+class ProducerBriefing(_Frozen):
+    """An answer, and the things it pointed at.
+
+    Prose and ids only. No field here causes a write, so the brain cannot reach
+    money even by being wrong about everything — the same reason ``ACCEPT``
+    routes to a human instead of buying.
+    """
+
+    text: str = Field(min_length=1)
+    referenced_item_ids: list[str] = Field(default_factory=list)
+    referenced_negotiation_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)

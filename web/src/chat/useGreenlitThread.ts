@@ -146,6 +146,8 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
             id: `b:${repliedAt.getTime()}`,
             text: answer.kind === "answered" ? answer.text : answer.detail,
             refs: answer.kind === "answered" ? answer.refs : [],
+            fromStoredFacts:
+              answer.kind === "answered" && answer.source === "stored-facts",
             at: repliedAt,
           },
         ]);

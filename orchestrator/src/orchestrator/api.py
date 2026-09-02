@@ -59,7 +59,7 @@ from orchestrator.app import build_brain
 from orchestrator.auth import Producer, init_firebase, require_producer
 from orchestrator.briefing import summarise
 from orchestrator.clock import SimClock
-from orchestrator.digest import ProjectDigest, build_digest
+from orchestrator.digest import ProjectDigest, as_question, build_digest
 from orchestrator.gmail import (
     GmailTransport,
     client_credentials,
@@ -684,6 +684,15 @@ class Answer(BaseModel):
     solely in a transcript is a purchase decision that scrolls away.
     """
 
+    source: str = "stored-facts"
+    """Which half answered: ``agent`` or ``stored-facts``.
+
+    On the wire because the difference matters to whoever is reading. Both
+    answers are true; only one of them reasoned, and a deployment where the
+    brain is misconfigured otherwise looks exactly like one where it is not.
+    Finding that out by noticing the prose feels flat is not a diagnosis.
+    """
+
 
 async def _digest_for(
     services: ApiServices, project_id: str, producer: Producer
@@ -718,20 +727,90 @@ async def _digest_for(
 
 @app.post("/chat")
 async def chat(request: Request, body: Ask, producer: Signed) -> Answer:
-    """Answer a question about a production from what is actually stored.
+    """Answer a question about a production.
 
-    Deterministic for now, and honestly so. Every number here is read from
-    Firestore rather than reasoned about, which is the right answer for "what
-    is going on" and is not pretending to be more. Free-form advice routes to
-    Role A's brain in the next step; until it does, this says what it can do
-    rather than inventing something.
+    The brain reasons; the stored facts are the floor. If the brain is
+    unavailable or returns something unusable, this falls back to the
+    deterministic summary — which is true, just not reasoned — and **says which
+    one answered**. A silent fallback would leave the screen looking exactly as
+    it does when everything is wired, which is the failure this codebase keeps
+    having to design against.
     """
     services = services_of(request)
     digest = await _digest_for(services, body.project_id, producer)
-    text, references = summarise(digest, body.question)
-    log.info("chat", extra={"project_id": body.project_id, "uid": producer.uid})
+
+    reasoned = await _reasoned(services, digest, body.question)
+    if reasoned is not None:
+        text, references = reasoned
+        source = "agent"
+    else:
+        text, references = summarise(digest, body.question)
+        source = "stored-facts"
+
+    log.info(
+        "chat",
+        extra={
+            "project_id": body.project_id,
+            "uid": producer.uid,
+            "source": source,
+        },
+    )
     return Answer(
         text=text,
         references=[Reference(kind=k, id=i, label=lbl) for k, i, lbl in references],
         waiting_on_you=digest.waiting_count,
+        source=source,
     )
+
+
+async def _reasoned(
+    services: ApiServices, digest: ProjectDigest, question: str
+) -> tuple[str, list[tuple[str, str, str]]] | None:
+    """Ask the brain, and check what comes back. ``None`` means fall back.
+
+    Every id is checked against the digest that was handed over — which is the
+    reason the digest was built as a boundary. An id the digest never carried
+    was invented, and is dropped rather than rendered as a link to a prop that
+    does not exist. The prose still stands: a briefing that cites one bad id is
+    usually right about everything else, and discarding the whole answer would
+    lose more than it protects.
+    """
+    try:
+        briefing = await services.brain.brief_producer(as_question(digest, question))
+    except Exception:
+        # Any failure at all — a model that is down, a schema that did not
+        # validate, a timeout. The deterministic summary is a true answer, so
+        # there is always something to say; what must not happen is saying
+        # nothing, or saying it as though the brain had spoken.
+        log.warning("briefing failed, falling back to stored facts", exc_info=True)
+        return None
+
+    text = briefing.text.strip()
+    if not text:
+        return None
+
+    known = digest.known_ids()
+    item_names = {i.item_id: i.name for i in digest.items}
+    talk_names = {n.negotiation_id: n.item_name for n in digest.negotiations}
+
+    references: list[tuple[str, str, str]] = []
+    invented = 0
+    for item_id in briefing.referenced_item_ids:
+        if item_id in known:
+            references.append(("item", item_id, item_names.get(item_id, item_id)))
+        else:
+            invented += 1
+    for negotiation_id in briefing.referenced_negotiation_ids:
+        if negotiation_id in known:
+            references.append(
+                ("negotiation", negotiation_id, talk_names.get(negotiation_id, ""))
+            )
+        else:
+            invented += 1
+
+    if invented:
+        log.warning(
+            "briefing cited ids the digest never carried",
+            extra={"project_id": digest.project_id, "invented": invented},
+        )
+    return text, references

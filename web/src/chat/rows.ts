@@ -37,6 +37,12 @@ export interface BriefingRow {
   id: string;
   text: string;
   refs: Reference[];
+  /** True when the deterministic summary answered instead of the brain.
+   *
+   * Shown, not hidden. Both answers are true, but only one reasoned, and a
+   * deployment whose brain is misconfigured otherwise looks exactly like one
+   * that is fine — which is the failure this project keeps designing against. */
+  fromStoredFacts?: boolean;
   at: Date;
 }
 

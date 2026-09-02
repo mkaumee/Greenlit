@@ -14,7 +14,14 @@ import { auth } from "@/firebase";
 import type { Reference } from "./rows";
 
 export type Answer =
-  | { kind: "answered"; text: string; refs: Reference[]; waitingOnYou: number }
+  | {
+      kind: "answered";
+      text: string;
+      refs: Reference[];
+      waitingOnYou: number;
+      /** Which half answered. Both are true; only one reasoned. */
+      source: "agent" | "stored-facts";
+    }
   | { kind: "signed-out"; detail: string }
   | { kind: "not-yours"; detail: string }
   | { kind: "error"; detail: string };
@@ -81,12 +88,17 @@ export async function ask(projectId: string, question: string): Promise<Answer> 
     text: string;
     references: Reference[];
     waiting_on_you: number;
+    source?: string;
   };
   return {
     kind: "answered",
     text: body.text,
     refs: body.references,
     waitingOnYou: body.waiting_on_you,
+    // Anything but an explicit "agent" is treated as the deterministic path,
+    // including an older deployment that does not send the field. Claiming the
+    // brain answered when it might not have is the mistake worth avoiding.
+    source: body.source === "agent" ? "agent" : "stored-facts",
   };
 }
 

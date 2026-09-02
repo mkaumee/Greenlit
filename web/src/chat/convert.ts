@@ -50,7 +50,14 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
       return {
         id: row.id,
         role: "assistant",
-        content: [{ type: "text", text: row.text }],
+        content: [
+          {
+            type: "text",
+            text: row.fromStoredFacts === true
+              ? `${row.text}\n\n— read from stored records; the agent did not answer this one.`
+              : row.text,
+          },
+        ],
         createdAt: row.at,
       };
 

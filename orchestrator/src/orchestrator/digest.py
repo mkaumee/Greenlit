@@ -25,7 +25,13 @@ cannot disagree about what is true — they are reading one set of facts.
 
 from dataclasses import dataclass, field
 
-from cinema_contracts import Money, NegotiationState
+from cinema_contracts import (
+    BriefingItem,
+    BriefingNegotiation,
+    Money,
+    NegotiationState,
+    ProducerQuestion,
+)
 
 from orchestrator.records import ItemRecord, ItemStatus, NegotiationRecord
 
@@ -169,4 +175,48 @@ def build_digest(
 
     return ProjectDigest(
         project_id=project_id, title=title, items=lines, negotiations=talks
+    )
+
+
+def as_question(digest: ProjectDigest, question: str) -> ProducerQuestion:
+    """The digest, in the shape the contract carries across the A/B boundary.
+
+    A separate type from ``ProjectDigest`` on purpose. This one is shared with
+    Role A and changing it is a two-person change; the digest is Role B's own
+    and is free to grow a field the brain has no business seeing.
+    """
+    return ProducerQuestion(
+        project_id=digest.project_id,
+        title=digest.title,
+        question=question,
+        items=[
+            BriefingItem(
+                item_id=item.item_id,
+                name=item.name,
+                status=item.status,
+                qty=item.qty,
+                best_quote=item.best_quote,
+                reference_low=item.reference_low,
+                reference_high=item.reference_high,
+                script_line=item.script_line,
+            )
+            for item in digest.items
+        ],
+        negotiations=[
+            BriefingNegotiation(
+                negotiation_id=talk.negotiation_id,
+                item_id=talk.item_id,
+                item_name=talk.item_name,
+                supplier=talk.supplier,
+                state=NegotiationState(talk.state),
+                rounds_used=talk.rounds_used,
+                max_rounds=talk.max_rounds,
+                first_quote=talk.first_quote,
+                latest_quote=talk.latest_quote,
+                reasoning=talk.reasoning,
+                waiting_on_human=talk.waiting_on_human,
+                escalation_reason=talk.escalation_reason,
+            )
+            for talk in digest.negotiations
+        ],
     )

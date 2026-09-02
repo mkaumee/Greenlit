@@ -339,7 +339,7 @@ def test_the_real_brain_is_built_with_the_configured_model(
     """The wiring to Role A's brain, pinned against a fake module.
 
     Still a fake rather than the real class: constructing ``GeminiAgentBrain``
-    builds four ADK agents, which is not something a unit test should do.
+    builds five ADK agents, which is not something a unit test should do.
 
     ``GeminiAgentBrain`` takes ``model`` as a required keyword deliberately —
     Role A's docstring says the application wiring chooses the deployed model
@@ -363,6 +363,7 @@ def test_the_real_brain_is_built_with_the_configured_model(
         async def research_item(self, _brief: object) -> object: ...
         async def extract_quote(self, _message: object) -> object: ...
         async def next_move(self, _ctx: object) -> object: ...
+        async def brief_producer(self, _question: object) -> object: ...
 
     module = types.ModuleType("main_agent")
     module.GeminiAgentBrain = FakeBrain  # pyright: ignore[reportAttributeAccessIssue]

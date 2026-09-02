@@ -160,3 +160,38 @@ describe("directionOf", () => {
     expect(directionOf("")).toBe("outbound");
   });
 });
+
+describe("a briefing that did not come from the brain", () => {
+  const briefing = (fromStoredFacts?: boolean): Row => ({
+    kind: "briefing",
+    id: "b-1",
+    text: "Nothing needs you right now.",
+    refs: [],
+    fromStoredFacts,
+    at: AT,
+  });
+
+  const textOf = (row: Row): string => {
+    const part = partsOf(row)[0];
+    return part !== undefined && typeof part !== "string" && part.type === "text"
+      ? part.text
+      : "";
+  };
+
+  it("says so, rather than passing it off as the agent", () => {
+    // Both answers are true; only one reasoned. A deployment whose brain is
+    // misconfigured otherwise looks exactly like one that is fine, and
+    // noticing that the prose feels flat is not a diagnosis.
+    expect(textOf(briefing(true))).toContain("stored records");
+  });
+
+  it("leaves a real answer alone", () => {
+    expect(textOf(briefing(false))).toBe("Nothing needs you right now.");
+  });
+
+  it("treats a missing flag as the agent having answered", () => {
+    // Optional so an older row shape still renders, and the default has to be
+    // the quiet one or every answer carries a disclaimer.
+    expect(textOf(briefing())).not.toContain("stored records");
+  });
+});
