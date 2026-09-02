@@ -34,6 +34,7 @@ import type { Row } from "./rows";
  */
 export const EMAIL_TOOL = "email";
 export const DECISION_TOOL = "approve_purchase";
+export const PROPS_TOOL = "read_script";
 
 export function toThreadMessage(row: Row): ThreadMessageLike {
   switch (row.kind) {
@@ -72,6 +73,26 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
               subject: row.subject,
             },
             result: { body: row.body },
+          },
+        ],
+        createdAt: row.at,
+      };
+
+    case "props":
+      // A completed call: the script has been read and the props are on
+      // screen. What has *not* happened is the producer confirming them, and
+      // that lives in the component rather than in an `approval` — the
+      // approval primitive is one decision, and this is a list of them.
+      return {
+        id: row.id,
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: row.id,
+            toolName: PROPS_TOOL,
+            args: { props: row.props, filename: row.filename },
+            result: { count: row.props.length },
           },
         ],
         createdAt: row.at,

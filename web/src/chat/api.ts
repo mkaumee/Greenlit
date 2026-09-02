@@ -139,3 +139,160 @@ export async function startConsent(): Promise<Consent> {
     };
   }
 }
+
+// --------------------------------------------------------------------------
+// Starting a production
+// --------------------------------------------------------------------------
+
+/** One prop the agent found, as offered back for confirmation.
+ *
+ * A type alias rather than an interface, deliberately: assistant-ui's tool-call
+ * `args` must satisfy `ReadonlyJSONValue`, and TypeScript gives type aliases an
+ * implicit index signature while interfaces get none. An interface here fails
+ * to assign with an error about index signatures that says nothing about the
+ * actual constraint. */
+export type Prop = {
+  item_id: string;
+  name: string;
+  category: string;
+  qty: number;
+  consumable: boolean;
+  confidence: number;
+  scenes: string[];
+  /** The script lines it was found in. The receipt. */
+  lines: string[];
+};
+
+export type Started =
+  | { kind: "started"; projectId: string; title: string }
+  | { kind: "error"; detail: string };
+
+export type ScriptResult =
+  | { kind: "read"; props: Prop[] }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "error"; detail: string };
+
+export type ConfirmResult =
+  | { kind: "confirmed"; confirmed: string[]; abandoned: string[] }
+  | { kind: "error"; detail: string };
+
+/**
+ * One place every call to `cinema-api` goes through.
+ *
+ * Failures come back as values rather than exceptions because each caller
+ * renders them differently, and because a thrown error inside a React event
+ * handler is a blank screen.
+ */
+async function post(path: string, body: unknown): Promise<Response | string> {
+  const url = base();
+  if (url === "") {
+    return (
+      "VITE_API_URL was not set when this was built, so there is nowhere to " +
+      "send this. `make deploy-web` fills it in."
+    );
+  }
+  try {
+    return await fetch(`${url}${path}`, {
+      method: "POST",
+      headers: await authorised(),
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    return describe(cause);
+  }
+}
+
+export async function startProject(title: string): Promise<Started> {
+  const reply = await post("/projects", { title });
+  if (typeof reply === "string") return { kind: "error", detail: reply };
+  if (!reply.ok) {
+    return { kind: "error", detail: await detailOf(reply) };
+  }
+  const body = (await reply.json()) as { project_id: string; title: string };
+  return { kind: "started", projectId: body.project_id, title: body.title };
+}
+
+/** What the browser hands the API: text, or a file it has already read. */
+export interface Upload {
+  filename: string;
+  mimeType: string;
+  text?: string;
+  contentB64?: string;
+}
+
+export async function uploadScript(
+  projectId: string,
+  upload: Upload,
+): Promise<ScriptResult> {
+  const reply = await post(`/projects/${projectId}/script`, {
+    filename: upload.filename,
+    mime_type: upload.mimeType,
+    text_content: upload.text ?? "",
+    content_b64: upload.contentB64 ?? "",
+  });
+  if (typeof reply === "string") return { kind: "error", detail: reply };
+
+  // 422 is the file being unreadable rather than the request being wrong, and
+  // the message is written for a producer — a scanned PDF says so, and says
+  // what to do instead. Rendered as-is.
+  if (reply.status === 422) {
+    return { kind: "unreadable", detail: await detailOf(reply) };
+  }
+  if (!reply.ok) return { kind: "error", detail: await detailOf(reply) };
+
+  const body = (await reply.json()) as { props: Prop[] };
+  return { kind: "read", props: body.props };
+}
+
+export interface Choice {
+  item_id: string;
+  qty: number;
+  include: boolean;
+}
+
+export async function confirmProps(
+  projectId: string,
+  choices: Choice[],
+): Promise<ConfirmResult> {
+  const reply = await post(`/projects/${projectId}/items/confirm`, {
+    items: choices,
+  });
+  if (typeof reply === "string") return { kind: "error", detail: reply };
+  if (!reply.ok) return { kind: "error", detail: await detailOf(reply) };
+
+  const body = (await reply.json()) as {
+    confirmed: string[];
+    abandoned: string[];
+  };
+  return {
+    kind: "confirmed",
+    confirmed: body.confirmed,
+    abandoned: body.abandoned,
+  };
+}
+
+const detailOf = async (reply: Response): Promise<string> => {
+  try {
+    const body = (await reply.json()) as { detail?: unknown };
+    if (typeof body.detail === "string") return body.detail;
+  } catch {
+    // A non-JSON body from a proxy or a 502 page. The status is still useful.
+  }
+  return `${reply.status} ${reply.statusText}`;
+};
+
+/** Read a dropped file into base64, which is what the API takes. */
+export async function toUpload(file: File): Promise<Upload> {
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  // Chunked because String.fromCharCode(...bytes) on a multi-megabyte
+  // screenplay overflows the argument list and throws.
+  let binary = "";
+  for (let i = 0; i < buffer.length; i += 8192) {
+    binary += String.fromCharCode(...buffer.subarray(i, i + 8192));
+  }
+  return {
+    filename: file.name,
+    mimeType: file.type || "application/octet-stream",
+    contentB64: btoa(binary),
+  };
+}

@@ -18,7 +18,7 @@ import type { AppendMessage, AssistantRuntime } from "@assistant-ui/react";
 import { useCallback, useMemo, useState } from "react";
 
 import type { Item, Message, Negotiation, Supplier } from "@/hooks/useProject";
-import { ask } from "./api";
+import { ask, toUpload, uploadScript, type Upload } from "./api";
 import { decisionsFor } from "./decisions";
 import { toThreadMessage } from "./convert";
 import { directionOf, inOrder, type Row } from "./rows";
@@ -47,6 +47,8 @@ export interface GreenlitThread {
   runtime: AssistantRuntime;
   /** Decisions waiting on a person. The rail reads this; it never scrolls. */
   waiting: Row[];
+  /** Hand a screenplay to the agent. Resolves once the props are on screen. */
+  readScript: (file: File) => Promise<void>;
 }
 
 export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
@@ -156,6 +158,59 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     [sources.projectId],
   );
 
+  /**
+   * Read a screenplay and put the props in the transcript.
+   *
+   * A conversation turn rather than a modal: reading a script is something the
+   * agent did, and it belongs in the record beside the emails it sent. The
+   * producer's line goes in first so the transcript reads as a thing they
+   * asked for rather than a panel that appeared.
+   */
+  const readScript = useCallback(
+    async (file: File) => {
+      const at = new Date();
+      setConversation((prior) => [
+        ...prior,
+        {
+          kind: "producer",
+          id: `p:${at.getTime()}`,
+          text: `Read ${file.name}.`,
+          at,
+        },
+      ]);
+      setRunning(true);
+      try {
+        const upload: Upload = await toUpload(file);
+        const result = await uploadScript(sources.projectId, upload);
+        const readAt = new Date();
+        setConversation((prior) => [
+          ...prior,
+          result.kind === "read"
+            ? {
+                kind: "props",
+                id: `s:${readAt.getTime()}`,
+                filename: file.name,
+                props: result.props,
+                at: readAt,
+              }
+            : {
+                // An unreadable file is not an error to swallow: the message
+                // says a scan is a scan and what to do instead, and it is
+                // written for the person reading it.
+                kind: "briefing",
+                id: `s:${readAt.getTime()}`,
+                text: result.detail,
+                refs: [],
+                at: readAt,
+              },
+        ]);
+      } finally {
+        setRunning(false);
+      }
+    },
+    [sources.projectId],
+  );
+
   const runtime = useExternalStoreRuntime<Row>({
     messages: rows,
     isRunning: running,
@@ -163,5 +218,5 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     convertMessage: toThreadMessage,
   });
 
-  return { runtime, waiting };
+  return { runtime, waiting, readScript };
 }

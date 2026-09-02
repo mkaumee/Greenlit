@@ -14,6 +14,8 @@
  * this project keeps having to design against.
  */
 
+import type { Prop } from "./api";
+
 /** Something an answer pointed at, that the panel renders as a link. */
 export interface Reference {
   kind: string;
@@ -94,7 +96,29 @@ export interface DecisionRow {
 export const directionOf = (value: string | undefined): "inbound" | "outbound" =>
   value?.toLowerCase() === "inbound" ? "inbound" : "outbound";
 
-export type Row = ProducerRow | BriefingRow | ActivityRow | DecisionRow;
+/**
+ * A screenplay that has been read, and the props it turned into.
+ *
+ * Lives in the transcript rather than in a modal because reading a script is
+ * something the agent did, in order, alongside the emails it sent — and
+ * because the confirmation gate is the most important thing on the screen. A
+ * producer who scrolls past it has not confirmed anything, and nothing moves
+ * until they do.
+ */
+export interface PropsRow {
+  kind: "props";
+  id: string;
+  filename: string;
+  props: Prop[];
+  at: Date;
+}
+
+export type Row =
+  | ProducerRow
+  | BriefingRow
+  | ActivityRow
+  | DecisionRow
+  | PropsRow;
 
 /**
  * Oldest first, by when each thing actually happened.

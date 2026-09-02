@@ -31,6 +31,7 @@ import { useGreenlitThread } from "@/chat/useGreenlitThread";
 import { Decision } from "@/components/chat/DecisionPart";
 import { signOutOfEverything, USE_EMULATOR, type User } from "@/firebase";
 import { MailboxCard } from "@/components/chat/MailboxCard";
+import { NewProduction } from "@/components/chat/NewProduction";
 import { PendingProject } from "@/components/chat/context";
 import { Transcript } from "@/components/chat/Transcript";
 import type { Item, Negotiation, Supplier } from "@/hooks/useProject";
@@ -72,7 +73,7 @@ export function Chat({
   );
   const messages = useAllMessages(projectId, negotiationIds);
 
-  const { runtime, waiting } = useGreenlitThread({
+  const { runtime, waiting, readScript } = useGreenlitThread({
     projectId,
     items,
     negotiations,
@@ -99,7 +100,7 @@ export function Chat({
           />
 
           <div className="flex min-h-0 flex-col">
-            <Transcript />
+            <Transcript onScript={(file) => void readScript(file)} />
           </div>
 
           <aside className="flex min-h-0 flex-col overflow-hidden">
@@ -193,6 +194,8 @@ function Rail({
       )}
 
       <MailboxCard state={mailbox} />
+
+      <NewProduction onStarted={onPickProject} />
 
       <div>
         <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
