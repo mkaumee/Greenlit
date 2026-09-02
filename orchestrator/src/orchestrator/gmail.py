@@ -33,6 +33,7 @@ the tick stamps it with ``clock.now()`` — see Hard Rule 2 in CLAUDE.md.
 import asyncio
 import base64
 import json
+from contextlib import suppress
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -111,13 +112,51 @@ class SecretManagerTokenStore:
         return response.payload.data.decode("utf-8")
 
     def write(self, refresh_token: str) -> None:
+        """Add a version, creating the secret the first time.
+
+        Secret Manager separates the container from its contents, and
+        ``add_secret_version`` on a container that does not exist is a plain
+        ``NotFound``. That was fine while there was one bootstrapped secret and
+        a human had made it by hand; it stopped being fine the moment every
+        producer got their own, because the first thing a new producer does is
+        write to a name nobody has created. It surfaced as a 500 on the OAuth
+        callback *after* Google had already granted consent — the worst place
+        for it, since the producer has done everything right and the grant is
+        spent.
+
+        Add-then-create rather than get-then-add: reconnecting is the common
+        case and costs one call, and the check-then-act version has a race
+        that this does not. Two producers connecting at the same instant both
+        create; one gets ``AlreadyExists`` and carries on to add its version.
+        """
+        from google.api_core import exceptions
         from google.cloud import secretmanager
 
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{self._project}/secrets/{self._secret}"
-        _ = client.add_secret_version(
-            request={"parent": parent, "payload": {"data": refresh_token.encode()}}
-        )
+        payload = {"data": refresh_token.encode()}
+
+        try:
+            _ = client.add_secret_version(
+                request={"parent": parent, "payload": payload}
+            )
+            return
+        except exceptions.NotFound:
+            pass
+
+        with suppress(exceptions.AlreadyExists):
+            _ = client.create_secret(
+                request={
+                    "parent": f"projects/{self._project}",
+                    "secret_id": self._secret,
+                    # Automatic replication: this is a credential, not data with
+                    # a residency requirement, and pinning regions here would be
+                    # a decision nothing else in the deploy makes.
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+
+        _ = client.add_secret_version(request={"parent": parent, "payload": payload})
 
 
 def token_store_for(settings: Settings) -> TokenStore:

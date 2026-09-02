@@ -949,3 +949,110 @@ def test_a_producer_token_falls_back_to_a_file_off_cloud(tmp_path: Path) -> None
     assert not (tmp_path / "gmail_refresh_token.json").exists(), (
         "must not collide with the single shared agent token"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Writing a producer's token into Secret Manager
+# --------------------------------------------------------------------------- #
+#
+# This class had no behavioural test at all — only assertions about which store
+# gets picked and what its secret is called. The gap cost a live deploy: a
+# producer completed Google's consent screen and got a 500 back, because
+# `add_secret_version` was called on a container nobody had created. The
+# consent grant is spent by then, so the failure lands after the producer has
+# done everything right.
+
+
+@final
+class FakeSecretClient:
+    """Secret Manager as far as this class uses it.
+
+    Containers and versions are separate, exactly as the real service has them,
+    because collapsing the two is the mistake being tested for.
+    """
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self.secrets: set[str] = set(existing or ())
+        self.versions: list[tuple[str, bytes]] = []
+        self.created: list[str] = []
+
+    def add_secret_version(self, *, request: dict[str, Any]) -> object:
+        from google.api_core import exceptions
+
+        parent = str(request["parent"])
+        if parent.rsplit("/", 1)[-1] not in self.secrets:
+            raise exceptions.NotFound(f"Secret [{parent}] not found.")
+        self.versions.append((parent, bytes(request["payload"]["data"])))
+        return object()
+
+    def create_secret(self, *, request: dict[str, Any]) -> object:
+        from google.api_core import exceptions
+
+        secret_id = str(request["secret_id"])
+        if secret_id in self.secrets:
+            raise exceptions.AlreadyExists(f"Secret [{secret_id}] already exists.")
+        self.secrets.add(secret_id)
+        self.created.append(secret_id)
+        return object()
+
+
+def _use(monkeypatch: pytest.MonkeyPatch, client: FakeSecretClient) -> None:
+    """Swap the client out on the module the store imports inside its methods.
+
+    That late import is what makes this patchable at all — the real client
+    wants credentials at construction, so a module-level one would need a GCP
+    project just to import the file.
+    """
+    from google.cloud import secretmanager
+
+    def build_client(*_args: object, **_kwargs: object) -> FakeSecretClient:
+        return client
+
+    monkeypatch.setattr(secretmanager, "SecretManagerServiceClient", build_client)
+
+
+def test_a_first_time_producer_gets_their_secret_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, exactly. Nobody creates `<secret>-<uid>` before the producer
+    who owns it connects, so the first write has to."""
+    client = FakeSecretClient()
+    _use(monkeypatch, client)
+
+    SecretManagerTokenStore("proj", "token-uid-1").write("refresh-me")
+
+    assert client.created == ["token-uid-1"]
+    assert client.versions == [("projects/proj/secrets/token-uid-1", b"refresh-me")]
+
+
+def test_reconnecting_does_not_recreate_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common case — the seven-day expiry means this runs weekly — and it
+    must cost one call, not a create attempt every time."""
+    client = FakeSecretClient(existing={"token-uid-1"})
+    _use(monkeypatch, client)
+
+    SecretManagerTokenStore("proj", "token-uid-1").write("second-token")
+
+    assert client.created == []
+    assert client.versions[-1][1] == b"second-token"
+
+
+def test_two_producers_connecting_at_once_both_store_a_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Add-then-create still races: both can miss, both can create, and one
+    loses. Losing means that producer's token is never stored and their
+    negotiations never send — silently, which is why the loser carries on to
+    add its version rather than propagating AlreadyExists."""
+    client = FakeSecretClient()
+    _use(monkeypatch, client)
+    store = SecretManagerTokenStore("proj", "token-shared")
+
+    store.write("first")
+    # The second caller's create loses to the first, which is what a real
+    # concurrent create returns.
+    store.write("second")
+
+    assert [payload for _, payload in client.versions] == [b"first", b"second"]

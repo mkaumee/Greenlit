@@ -1,3 +1,7 @@
+# tomllib returns Any by nature, and the manifest's shape is asserted below
+# rather than typed.
+# pyright: reportAny=false, reportUnknownArgumentType=false
+# pyright: reportUnknownVariableType=false
 """The Dockerfile and the workspace have to agree about what exists.
 
 `make check` does not build the image — there is no docker daemon in CI, and
