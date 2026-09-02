@@ -166,18 +166,32 @@ export function useProjects(): { ids: string[]; error: string } {
   });
 
   useEffect(() => {
-    const stop = onAuthStateChanged(auth, (user) => {
+    // Same leak as useMailbox had: what an auth observer returns is discarded,
+    // so the previous user's query kept running after a re-sign-in and could
+    // overwrite the new one's results with its own failure.
+    let stopSnapshot: (() => void) | undefined;
+    const close = () => {
+      stopSnapshot?.();
+      stopSnapshot = undefined;
+    };
+
+    const stopAuth = onAuthStateChanged(auth, (user) => {
+      close();
       if (user === null) {
         setState({ ids: [], error: "" });
         return;
       }
-      return onSnapshot(
+      stopSnapshot = onSnapshot(
         query(collection(db, "projects"), where("owner_uid", "==", user.uid)),
         (snap) => setState({ ids: snap.docs.map((d) => d.id), error: "" }),
         (cause) => setState({ ids: [], error: cause.message }),
       );
     });
-    return stop;
+
+    return () => {
+      close();
+      stopAuth();
+    };
   }, []);
 
   return state;
@@ -190,33 +204,71 @@ export function useProjects(): { ids: string[]; error: string } {
  * here: the card has to change the moment the OAuth callback writes, and that
  * write happens in a popup this page never hears from. A snapshot is what
  * closes that loop — the popup closes itself, Firestore pushes, the card
- * flips. Polling would be the alternative, and would be wrong for a state that
- * changes about twice a week.
+ * flips.
  *
- * `undefined` means not read yet; `null` means read, and there is none. The
- * difference matters: rendering "no mailbox connected" during the first paint
- * of a connected account is a lie that lasts long enough to act on.
+ * ## Four states, not three, and none of them overloaded
+ *
+ * This returned `MailboxDoc | null | undefined`, where `undefined` meant both
+ * "not read yet" and "the read failed" — and `cardFor` rendered both as the
+ * Connect button. So a producer whose mailbox was connected, whose token was in
+ * Secret Manager and whose record was in Firestore, was shown a button asking
+ * them to connect it. The comment here used to assert that a failure was "a
+ * signed-out race rather than a mailbox that is missing", which was a guess,
+ * and wrong: the deployed security rules were behind the code and the read was
+ * being denied outright. Nothing on the screen could say so.
+ *
+ * The failure this system is built to avoid is a supplier's silence being
+ * indistinguishable from a broken transport. This was the same shape of
+ * mistake, in the browser.
  */
-export function useMailbox(): MailboxDoc | null | undefined {
-  const [record, setRecord] = useState<MailboxDoc | null | undefined>(undefined);
+export type MailboxState =
+  | { status: "loading" }
+  | { status: "none" }
+  | { status: "have"; record: MailboxDoc }
+  | { status: "denied"; detail: string };
+
+export function useMailbox(): MailboxState {
+  const [state, setState] = useState<MailboxState>({ status: "loading" });
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (user) => {
+    // Firebase ignores what an auth observer returns, so `return onSnapshot(…)`
+    // inside one unsubscribes nothing: the listener opened for the previous
+    // user outlives them. Signing out and back in then leaves two listeners on
+    // the same document, and the stale one — now failing, because it is reading
+    // as nobody — overwrites the live one's value. Hence a variable the
+    // effect's own cleanup can close over.
+    let stopSnapshot: (() => void) | undefined;
+    const close = () => {
+      stopSnapshot?.();
+      stopSnapshot = undefined;
+    };
+
+    const stopAuth = onAuthStateChanged(auth, (user) => {
+      close();
       if (user === null) {
-        setRecord(null);
+        setState({ status: "none" });
         return;
       }
-      return onSnapshot(
+      setState({ status: "loading" });
+      stopSnapshot = onSnapshot(
         doc(db, "mailboxes", user.uid),
-        (snap) => setRecord(snap.exists() ? (snap.data() as MailboxDoc) : null),
-        // Rules allow reading only your own, so a failure here is a signed-out
-        // race rather than a mailbox that is missing. Unknown, not none.
-        () => setRecord(undefined),
+        (snap) =>
+          setState(
+            snap.exists()
+              ? { status: "have", record: snap.data() as MailboxDoc }
+              : { status: "none" },
+          ),
+        (cause) => setState({ status: "denied", detail: cause.message }),
       );
     });
+
+    return () => {
+      close();
+      stopAuth();
+    };
   }, []);
 
-  return record;
+  return state;
 }
 
 /** The transcript of one negotiation, oldest first — the proof days passed. */

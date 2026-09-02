@@ -50,6 +50,7 @@ export function Chat({
   negotiations,
   suppliers,
   supplierName,
+  readError,
 }: {
   user: User;
   projectId: string;
@@ -59,6 +60,8 @@ export function Chat({
   negotiations: Negotiation[];
   suppliers: Supplier[];
   supplierName: (id: string | undefined) => string;
+  /** Whatever Firestore refused, if anything. Empty when all reads are fine. */
+  readError: string;
 }) {
   const mailbox = useMailbox();
   const [panel, setPanel] = useState<Panel>("needs-you");
@@ -92,6 +95,7 @@ export function Chat({
             onPickProject={onPickProject}
             mailbox={mailbox}
             waiting={waiting}
+            readError={readError}
           />
 
           <div className="flex min-h-0 flex-col">
@@ -134,6 +138,7 @@ function Rail({
   onPickProject,
   mailbox,
   waiting,
+  readError,
 }: {
   user: User;
   projectId: string;
@@ -141,6 +146,7 @@ function Rail({
   onPickProject: (id: string) => void;
   mailbox: ReturnType<typeof useMailbox>;
   waiting: Row[];
+  readError: string;
 }) {
   return (
     <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
@@ -172,7 +178,21 @@ function Rail({
         )}
       </div>
 
-      <MailboxCard record={mailbox} />
+      {/* A refused read is why an empty screen and a broken one look the same.
+          Said once, at the top, because every collection on this screen shares
+          one cause when it happens: rules deployed behind the code. */}
+      {readError !== "" && (
+        <div className="rounded-lg border border-destructive/50 p-3 text-xs">
+          <p className="font-medium">Firestore refused a read</p>
+          <p className="mt-1 text-muted-foreground">
+            What is on this screen may be incomplete rather than empty. Usually
+            the deployed security rules are behind the code —{" "}
+            <code>make deploy-rules</code> pushes them. {readError}
+          </p>
+        </div>
+      )}
+
+      <MailboxCard state={mailbox} />
 
       <div>
         <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">

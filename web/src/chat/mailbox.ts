@@ -25,30 +25,79 @@ export interface MailboxDoc {
   status?: string;
 }
 
+/**
+ * What the panel knows, which is not the same as what the record says.
+ *
+ * `cardFor` takes this rather than `MailboxDoc | null | undefined` because
+ * that signature could not distinguish "not read yet" from "the read was
+ * refused", and rendered both as the Connect button — telling a producer with
+ * a working mailbox to connect one. Worse, every field on `MailboxDoc` is
+ * optional, so `{ status: "loading" }` satisfies it structurally and the
+ * compiler had nothing to say about the two being mixed up.
+ *
+ * Kept in step with `useMailbox`, which produces it.
+ */
+export type MailboxState =
+  | { status: "loading" }
+  | { status: "none" }
+  | { status: "have"; record: MailboxDoc }
+  | { status: "denied"; detail: string };
+
 export interface MailboxCard {
   /** Drives the colour, and nothing else. */
-  tone: "none" | "connected" | "broken";
+  tone: "none" | "connected" | "broken" | "unknown";
   headline: string;
   detail: string;
-  /** The button's label. Never empty: every state has something to do, even
-   * the healthy one, because a producer about to demo wants to re-consent
-   * before the seven days run out rather than after. */
+  /** The button's label, or empty for the states where there is nothing
+   * useful to press. */
   action: string;
 }
 
-export function cardFor(record: MailboxDoc | null | undefined): MailboxCard {
-  if (!record) {
-    return {
-      tone: "none",
-      headline: "No mailbox connected",
-      detail:
-        "The agent negotiates from your Gmail, as you. Until one is " +
-        "connected it can read a script and price things, but it cannot " +
-        "write to a seller.",
-      action: "Connect Gmail",
-    };
-  }
+export function cardFor(state: MailboxState): MailboxCard {
+  switch (state.status) {
+    case "loading":
+      // No button. A Connect button that flashes up for half a second on every
+      // load of a connected account is a lie, and people click it.
+      return {
+        tone: "unknown",
+        headline: "Checking your mailbox…",
+        detail: "",
+        action: "",
+      };
 
+    case "none":
+      return {
+        tone: "none",
+        headline: "No mailbox connected",
+        detail:
+          "The agent negotiates from your Gmail, as you. Until one is " +
+          "connected it can read a script and price things, but it cannot " +
+          "write to a seller.",
+        action: "Connect Gmail",
+      };
+
+    case "denied":
+      // The state that did not exist, and cost an evening. Firestore refused
+      // the read, which almost always means the deployed security rules are
+      // behind the code — `match /mailboxes/{uid}` is recent, and `make deploy`
+      // does not push rules.
+      return {
+        tone: "broken",
+        headline: "Could not read your mailbox",
+        detail:
+          "Firestore refused the read, so this card cannot say whether a " +
+          "mailbox is connected. Usually the deployed security rules are " +
+          "behind the code: `make deploy-rules` pushes them. " +
+          state.detail,
+        action: "",
+      };
+
+    case "have":
+      return cardForRecord(state.record);
+  }
+}
+
+function cardForRecord(record: MailboxDoc): MailboxCard {
   const address = record.email ?? "";
   switch (record.status) {
     case "CONNECTED":

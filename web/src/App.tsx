@@ -71,13 +71,20 @@ export function App() {
 }
 
 function SignedIn({ user }: { user: User }) {
-  const { ids } = useProjects();
+  const { ids, error: projectsError } = useProjects();
   const [chosen, setChosen] = useState("");
   const projectId = chosen !== "" && ids.includes(chosen) ? chosen : (ids[0] ?? "");
 
-  const { rows: items } = useItems(projectId);
-  const { rows: negotiations } = useNegotiations(projectId);
-  const { rows: suppliers } = useSuppliers(projectId);
+  const { rows: items, error: itemsError } = useItems(projectId);
+  const { rows: negotiations, error: negotiationsError } = useNegotiations(projectId);
+  const { rows: suppliers, error: suppliersError } = useSuppliers(projectId);
+
+  // These were read and discarded, so a rules refusal on any collection
+  // rendered as a production with nothing in it — the same silent failure the
+  // mailbox card had, one collection over. First one wins: they share a cause
+  // in practice, and four copies of the same message is not four problems.
+  const readError =
+    projectsError || itemsError || negotiationsError || suppliersError;
 
   const supplierName = (id: string | undefined): string =>
     suppliers.find((s) => s.id === id)?.name ?? id ?? "unknown seller";
@@ -104,6 +111,7 @@ function SignedIn({ user }: { user: User }) {
             negotiations={negotiations}
             suppliers={suppliers}
             supplierName={supplierName}
+            readError={readError}
           />
         }
       />
