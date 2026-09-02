@@ -78,12 +78,44 @@ class SupplierCandidate(_Frozen):
 
 
 class ScriptSource(_Frozen):
-    """An uploaded screenplay, before anyone has read it for objects."""
+    """An uploaded screenplay, before anyone has read it for objects.
+
+    Text or bytes, never both and never neither.
+
+    ``content_b64`` exists because a screenplay is a layout format — scene
+    headings at the margin, character names centred, dialogue indented — and
+    flattening a PDF to a string before the model sees it throws that away.
+    Role A hands the document to Gemini as an attachment instead, which also
+    means a scanned script works: the model reads the page, and an extractor
+    would have found no text layer and given up.
+
+    Role A must exclude ``content_b64`` from any prompt text it builds. A
+    megabyte of base64 in the prose is not a document to a model; it is noise
+    it may well try to read.
+    """
 
     filename: str
     mime_type: str
     text_content: str = ""
+    content_b64: str = ""
+    """The file itself, for formats that are not usefully text: PDF today."""
     gcs_uri: str = ""
+    """Unused. The door for a screenplay too large to inline."""
+
+    @override
+    def model_post_init(self, _context: object, /) -> None:
+        has_text = bool(self.text_content.strip())
+        has_bytes = bool(self.content_b64.strip())
+        if has_text == has_bytes:
+            # Neither is the failure this whole area keeps circling: an empty
+            # source comes back as a confident list of no props, which reads
+            # exactly like a screenplay that needs nothing bought. Both is two
+            # sources of truth for one screenplay, and nothing says which wins.
+            raise ValueError(
+                "ScriptSource needs exactly one of text_content or "
+                "content_b64. Neither means the brain would be asked to read "
+                "nothing and would answer anyway; both means two screenplays."
+            )
 
 
 class SceneMention(_Frozen):

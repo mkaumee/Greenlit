@@ -68,7 +68,13 @@ from orchestrator.gmail import (
 from orchestrator.logs import configure_logging
 from orchestrator.records import MailboxRecord, MailboxStatus, ProjectRecord
 from orchestrator.repository import FirestoreRepository
-from orchestrator.scripts import UnreadableScriptError, decode_upload
+from orchestrator.scripts import (
+    PDF_MIME,
+    UnreadableScriptError,
+    check_document,
+    decode_upload,
+    is_document,
+)
 from orchestrator.settings import GMAIL_SCOPES, Settings
 
 log = logging.getLogger("orchestrator.api")
@@ -560,37 +566,28 @@ async def upload_script(
     services = services_of(request)
     _ = await _owned(services, project_id, producer)
 
-    if body.content_b64:
-        try:
-            text = decode_upload(
-                filename=body.filename,
-                mime_type=body.mime_type,
-                content_b64=body.content_b64,
-            )
-        except UnreadableScriptError as exc:
-            # 422 rather than 400: the request was well formed, the file was
-            # not readable. The message is written for the producer and is
-            # rendered as-is.
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-    else:
-        text = body.text_content
+    try:
+        source = _source_for(body)
+    except UnreadableScriptError as exc:
+        # 422 rather than 400: the request was well formed, the file was not
+        # something that can be sent on. The message is written for the
+        # producer and is rendered as-is.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if not text.strip():
-        raise HTTPException(
-            status_code=422, detail="There is no screenplay text to read."
+    try:
+        found = await intake.read_script(
+            services.repo,
+            services.clock,
+            services.brain,
+            project_id=project_id,
+            source=source,
         )
+    except ValueError as exc:
+        # The scripted brain refusing a document it cannot read. Its message
+        # names CINEMA_BRAIN_BACKEND, which is the actual fix, so it goes
+        # through to the producer rather than becoming a 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    found = await intake.read_script(
-        services.repo,
-        services.clock,
-        services.brain,
-        project_id=project_id,
-        source=ScriptSource(
-            filename=body.filename,
-            mime_type=body.mime_type,
-            text_content=text,
-        ),
-    )
     log.info(
         "script read",
         extra={"project_id": project_id, "uid": producer.uid, "props": len(found)},
@@ -634,6 +631,39 @@ async def confirm_items(
         },
     )
     return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
+
+
+def _source_for(body: UploadScript) -> ScriptSource:
+    """Text stays text; a document travels as bytes.
+
+    A PDF is not flattened here. Role A hands it to Gemini as an attachment,
+    which keeps the layout a screenplay depends on and reads a scanned one that
+    no text extractor could. All this decides is which of the two fields the
+    upload belongs in.
+    """
+    if body.content_b64 and is_document(
+        filename=body.filename, mime_type=body.mime_type
+    ):
+        check_document(filename=body.filename, content_b64=body.content_b64)
+        return ScriptSource(
+            filename=body.filename,
+            mime_type=body.mime_type or PDF_MIME,
+            content_b64=body.content_b64,
+        )
+
+    text = (
+        decode_upload(filename=body.filename, content_b64=body.content_b64)
+        if body.content_b64
+        else body.text_content
+    )
+    if not text.strip():
+        raise UnreadableScriptError("There is no screenplay text to read.")
+
+    return ScriptSource(
+        filename=body.filename,
+        mime_type=body.mime_type,
+        text_content=text,
+    )
 
 
 def _project_id_for(title: str) -> str:

@@ -1,5 +1,6 @@
 """Convert an uploaded screenplay into unpersisted prop drafts."""
 
+import base64
 import json
 from typing import cast, final
 
@@ -10,6 +11,8 @@ from main_agent.gemini_schema import gemini_output_schema
 from main_agent.runtime import AdkAgentRuntime
 
 _INSTRUCTION = """You extract physical props from a screenplay.
+The screenplay is either in the payload's text_content or attached as a
+document; read whichever is present.
 Return only props explicitly supported by the supplied document. Do not invent
 plausible items. Every prop must include at least one SceneMention containing
 the scene and an exact supporting quote. Record quantity, whether the prop is
@@ -44,8 +47,25 @@ class BreakdownParser:
         )
 
     async def parse(self, source: ScriptSource) -> list[PropDraft]:
-        """Return validated prop drafts; persistence remains Role B's job."""
-        response = await self._runtime.run_json(source.model_dump_json())
+        """Return validated prop drafts; persistence remains Role B's job.
+
+        A screenplay arrives either as text or as a file. The file goes to the
+        model as an attachment and is *excluded from the JSON payload*: base64
+        in the prompt text is not a document, it is a megabyte of noise the
+        model may try to read. That exclusion is the one thing here that would
+        be silently expensive to get wrong, so it has a test.
+        """
+        attachment: tuple[bytes, str] | None = None
+        if source.content_b64:
+            attachment = (
+                base64.b64decode(source.content_b64),
+                source.mime_type or "application/pdf",
+            )
+
+        response = await self._runtime.run_json(
+            source.model_dump_json(exclude={"content_b64"}),
+            attachment=attachment,
+        )
         decoded = cast(object, json.loads(response))
         if not isinstance(decoded, list):
             raise ValueError("Prop extraction response must be a JSON list.")

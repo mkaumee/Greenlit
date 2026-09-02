@@ -119,6 +119,20 @@ class ScriptedBrain:
         line it was found in, and a prop hit by a destructive verb comes back
         ``consumable``.
         """
+        if source.content_b64:
+            # A keyword scan cannot read a PDF, and returning [] would be the
+            # exact failure this whole path guards against: a producer would
+            # see "no props found" and conclude their screenplay needed
+            # nothing bought. Refusing names the reason instead.
+            raise ValueError(
+                f"{source.filename or 'That file'} is a document, and this "
+                "deployment is running the scripted brain "
+                "(CINEMA_BRAIN_BACKEND=scripted), which only reads plain "
+                "text. Paste the text, upload a .txt or .fdx, or switch to "
+                "CINEMA_BRAIN_BACKEND=main-agent, which reads the file "
+                "itself."
+            )
+
         found: dict[str, list[SceneMention]] = {}
         destroyed: set[str] = set()
         scene = "1"

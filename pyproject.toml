@@ -96,7 +96,7 @@ reportImplicitStringConcatenation = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["contracts/tests", "orchestrator/tests"]
+testpaths = ["contracts/tests", "orchestrator/tests", "main-agent/tests"]
 pythonpath = ["scripts", "orchestrator/tests"]
 # orchestrator/tests is on the path so a test can import the emulator helpers
 # from conftest by name rather than relying on pytest's rootdir insertion,

@@ -34,12 +34,21 @@ class AdkAgentRuntime:
     app_name: str
     agent: LlmAgent
 
-    async def run_json(self, payload: str) -> str:
+    async def run_json(
+        self, payload: str, *, attachment: tuple[bytes, str] | None = None
+    ) -> str:
         """Run the agent once and return its final JSON text.
 
         A unique session is deliberately created for every contracts call.
         The complete domain context is already present in ``payload``; reusing
         an ADK session would create a hidden second state store beside Firestore.
+
+        ``attachment`` is ``(data, mime_type)`` for a capability whose input is
+        a document rather than prose — a screenplay PDF today. It goes as its
+        own part, so the model reads it as a file: layout, columns and all, and
+        with OCR when the page is an image. The caller is responsible for
+        keeping those same bytes out of ``payload``, where they would arrive as
+        a wall of base64 the model has no reason to recognise.
         """
         session_service = InMemorySessionService()
         session_id = uuid4().hex
@@ -53,10 +62,11 @@ class AdkAgentRuntime:
             agent=self.agent,
             session_service=session_service,
         )
-        message = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=payload)],
-        )
+        parts = [types.Part.from_text(text=payload)]
+        if attachment is not None:
+            data, mime_type = attachment
+            parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+        message = types.Content(role="user", parts=parts)
 
         final_text: str | None = None
         async for event in runner.run_async(

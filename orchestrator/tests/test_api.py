@@ -30,6 +30,7 @@ from cinema_contracts import (
     ProducerBriefing,
     ProducerQuestion,
     SceneMention,
+    ScriptSource,
 )
 from cinema_contracts.testing import ScriptedBrain
 from conftest import TokenMinter
@@ -580,12 +581,58 @@ async def test_a_stranger_cannot_upload_a_script_to_your_production(
     assert confirm.status_code == 404
 
 
-async def test_an_unreadable_upload_says_so_rather_than_finding_no_props(
+async def test_a_pdf_reaches_the_brain_as_a_document(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Not flattened to text on the way.
+
+    Gemini reads the file, which keeps the layout a screenplay depends on and
+    handles a scanned script that no text extractor could. This service's job
+    is to decide which field the upload belongs in and to send it on.
+    """
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+
+    seen: list[ScriptSource] = []
+
+    @final
+    class _Watcher:
+        def __getattr__(self, name: str) -> object:
+            return getattr(ScriptedBrain(), name)
+
+        async def extract_props(self, source: ScriptSource) -> list[object]:
+            seen.append(source)
+            return []
+
+    _with_brain(firestore, _Watcher())
+    encoded = base64.b64encode(b"%PDF-1.4 pretend screenplay").decode()
+
+    reply = await api.post(
+        f"/projects/{project_id}/script",
+        headers=headers,
+        json={
+            "filename": "nightfall.pdf",
+            "mime_type": "application/pdf",
+            "content_b64": encoded,
+        },
+    )
+
+    assert reply.status_code == 200, reply.text
+    assert len(seen) == 1
+    assert seen[0].content_b64 == encoded
+    assert seen[0].text_content == ""
+
+
+async def test_a_pdf_is_refused_when_the_brain_cannot_read_one(
     api: httpx.AsyncClient, tokens: TokenMinter
 ) -> None:
-    """A scanned PDF reaching the brain as an empty string comes back as a
-    confident list of no props, which reads exactly like a screenplay that
-    needed nothing bought."""
+    """The scripted brain is a keyword scan over text.
+
+    Returning no props would be the failure this whole path guards against: a
+    producer would see an empty list and conclude their screenplay needed
+    nothing bought. The refusal names CINEMA_BRAIN_BACKEND, which is the fix.
+    """
     uid = tokens.create("owner@example.invalid")
     headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
     project_id = await _start(api, headers)
@@ -594,14 +641,14 @@ async def test_an_unreadable_upload_says_so_rather_than_finding_no_props(
         f"/projects/{project_id}/script",
         headers=headers,
         json={
-            "filename": "scan.pdf",
+            "filename": "nightfall.pdf",
             "mime_type": "application/pdf",
-            "content_b64": base64.b64encode(b"not a pdf at all").decode(),
+            "content_b64": base64.b64encode(b"%PDF-1.4 anything").decode(),
         },
     )
 
     assert reply.status_code == 422
-    assert "scan.pdf" in reply.json()["detail"]
+    assert "CINEMA_BRAIN_BACKEND" in reply.json()["detail"]
 
 
 async def test_an_empty_script_is_refused(

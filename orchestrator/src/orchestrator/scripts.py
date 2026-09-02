@@ -1,59 +1,58 @@
-"""Turning whatever a producer dropped on the page into text a brain can read.
+"""What a producer dropped on the page, on its way to the brain.
 
-``ScriptSource.text_content`` is what the breakdown parser actually reads, so
-everything has to become text before it reaches Role A. Screenplays in the real
-world are PDFs, which is why this exists rather than the upload accepting only
-what is already text.
+Deliberately thin, and thinner than it was. An earlier version flattened PDFs
+to text with pypdf before Role A ever saw them, which threw away the thing a
+screenplay most depends on: scene headings at the margin, character names
+centred, dialogue indented. It also refused a scanned script, because there was
+no text layer to extract — while the model it was feeding would have read the
+page perfectly well.
 
-Deliberately narrow. It extracts a text layer; it does not OCR, render, or
-follow anything embedded. A PDF with no text layer is a scan or an image
-export, and that is reported as what it is — the alternative is handing the
-brain an empty string and getting back a confident list of no props, which
-reads exactly like a screenplay that needed nothing.
+So PDFs are not read here at all. They go to Gemini as an attachment and it
+reads the document. What is left is decoding: text files become strings,
+because that is what ``ScriptSource.text_content`` is for, and anything else
+travels as bytes.
+
+Decoding is not parsing. Nothing here inspects a screenplay.
 """
 
 import base64
 import binascii
-from io import BytesIO
 
 PDF_MIME = "application/pdf"
 
-# .fdx is Final Draft's XML and .fountain is plain text with markup. Both are
-# readable as-is: the brain is being asked to find objects in prose, and a few
-# stray tags cost far less than a parser per format would.
-TEXT_MIMES = frozenset(
-    {
-        "text/plain",
-        "text/markdown",
-        "application/xml",
-        "text/xml",
-        "application/octet-stream",
-    }
-)
+MAX_BYTES = 15 * 1024 * 1024
+"""Refused above this, decoded.
+
+Cloud Run caps a request at 32 MB and base64 inflates by a third, so a file
+much past this arrives as a truncated request rather than as an error anybody
+can read. Feature screenplays are a few megabytes; ``ScriptSource.gcs_uri``
+exists, unused, as the door for whatever is not.
+"""
 
 
 class UnreadableScriptError(ValueError):
-    """The upload could not be turned into text. The message is for a person."""
+    """The upload cannot be sent on. The message is written for a person."""
 
 
-def decode_upload(*, filename: str, mime_type: str, content_b64: str) -> str:
-    """Base64 in, screenplay text out.
+def is_document(*, filename: str, mime_type: str) -> bool:
+    """True when this should travel as a file rather than as text.
 
-    Base64 rather than multipart because the whole producer-facing API is JSON
-    and one encoding is worth more than the bytes it costs.
+    Extension as well as mime type, because a browser reports
+    ``application/octet-stream`` for a file dragged out of some file managers,
+    and decoding a PDF's bytes as UTF-8 produces a message about text encoding
+    that is true and useless.
     """
-    try:
-        raw = base64.b64decode(content_b64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise UnreadableScriptError(
-            "That upload was not valid base64, so nothing could be read from it."
-        ) from exc
+    return mime_type == PDF_MIME or filename.lower().endswith(".pdf")
 
-    if not raw:
-        raise UnreadableScriptError(f"{filename or 'That file'} is empty.")
 
-    if mime_type == PDF_MIME or filename.lower().endswith(".pdf"):
-        return _from_pdf(raw, filename)
+def decode_upload(*, filename: str, content_b64: str) -> str:
+    """Base64 in, screenplay text out. Text formats only.
+
+    No mime type: it decided which branch to take when this also read PDFs,
+    and now :func:`is_document` makes that call before anything gets here. A
+    PDF reaching this function is a bug in the caller, not a bad upload.
+    """
+    raw = _raw(filename, content_b64)
 
     try:
         text = raw.decode("utf-8")
@@ -69,29 +68,32 @@ def decode_upload(*, filename: str, mime_type: str, content_b64: str) -> str:
     return text
 
 
-def _from_pdf(raw: bytes, filename: str) -> str:
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
+def check_document(*, filename: str, content_b64: str) -> None:
+    """Refuse a file that cannot be sent on, without decoding what it says.
 
+    The only questions worth asking about a document here are whether it is
+    real base64 and whether it will fit. What is *in* it is the model's
+    business — that is the whole point of not extracting it.
+    """
+    _ = _raw(filename, content_b64)
+
+
+def _raw(filename: str, content_b64: str) -> bytes:
     try:
-        reader = PdfReader(BytesIO(raw))
-        pages = [page.extract_text() or "" for page in reader.pages]
-    except (PdfReadError, ValueError, OSError) as exc:
+        raw = base64.b64decode(content_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
         raise UnreadableScriptError(
-            f"{filename or 'That PDF'} could not be opened. If it is password "
-            "protected, remove the password and upload it again."
+            "That upload was not valid base64, so nothing could be read from it."
         ) from exc
 
-    text = "\n".join(pages).strip()
-    if not text:
-        # The failure worth naming. Handing an empty string to the brain would
-        # come back as a confident list of no props, indistinguishable from a
-        # screenplay that genuinely needs nothing bought.
+    if not raw:
+        raise UnreadableScriptError(f"{filename or 'That file'} is empty.")
+    if len(raw) > MAX_BYTES:
         raise UnreadableScriptError(
-            f"{filename or 'That PDF'} has no text in it — it is almost "
-            "certainly a scan or an image export. This reads a PDF's text "
-            "layer and does not run OCR, so it needs a PDF that was written "
-            "rather than photographed. Exporting again from the original, or "
-            "pasting the text, both work."
+            f"{filename or 'That file'} is {len(raw) // (1024 * 1024)} MB, "
+            f"over the {MAX_BYTES // (1024 * 1024)} MB limit. A feature "
+            "screenplay is normally a few megabytes — if this one is not, it "
+            "is probably scanned at a much higher resolution than reading it "
+            "needs."
         )
-    return text
+    return raw

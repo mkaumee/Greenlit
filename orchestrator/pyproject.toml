@@ -17,10 +17,6 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.6",
-    # Screenplays arrive as PDFs. Text extraction only — nothing here renders
-    # or rasterises, and a PDF with no extractable text layer is reported as
-    # the scan it almost certainly is rather than as a script with no props.
-    "pypdf>=5.1",
     # Role A's brain. A real dependency rather than an optional extra: the
     # image has to carry google-adk and parallel-web or
     # CINEMA_BRAIN_BACKEND=main-agent fails at import, and the whole point of
