@@ -41,17 +41,21 @@ import logging
 import secrets
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Annotated
 from urllib.parse import urlencode
 
+from cinema_contracts import AgentBrain, Money, ScriptSource
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1 import AsyncClient
 from pydantic import BaseModel, Field
 
+from orchestrator import intake
+from orchestrator.app import build_brain
 from orchestrator.auth import Producer, init_firebase, require_producer
 from orchestrator.briefing import summarise
 from orchestrator.clock import SimClock
@@ -62,8 +66,9 @@ from orchestrator.gmail import (
     producer_token_store,
 )
 from orchestrator.logs import configure_logging
-from orchestrator.records import MailboxRecord, MailboxStatus
+from orchestrator.records import MailboxRecord, MailboxStatus, ProjectRecord
 from orchestrator.repository import FirestoreRepository
+from orchestrator.scripts import UnreadableScriptError, decode_upload
 from orchestrator.settings import GMAIL_SCOPES, Settings
 
 log = logging.getLogger("orchestrator.api")
@@ -88,6 +93,15 @@ class ApiServices:
     client: AsyncClient
     repo: FirestoreRepository
     clock: SimClock
+    brain: AgentBrain
+    """Reading a screenplay is a reasoning call, and this is the service a
+    producer's browser can reach — so the brain lives here as well as on the
+    tick. It never negotiates and never researches from this service: those
+    stay on the tick, which is why this one needs no PARALLEL_API_KEY.
+
+    It does need `roles/aiplatform.user` on the api service account. Without
+    it every upload fails at request time rather than at startup, which is why
+    `scripts/deploy.sh` grants it to both accounts."""
 
 
 def build_api_services(settings: Settings | None = None) -> ApiServices:
@@ -95,7 +109,11 @@ def build_api_services(settings: Settings | None = None) -> ApiServices:
     client = AsyncClient(project=resolved.gcp_project)
     repo = FirestoreRepository(client)
     return ApiServices(
-        settings=resolved, client=client, repo=repo, clock=SimClock(repo)
+        settings=resolved,
+        client=client,
+        repo=repo,
+        clock=SimClock(repo),
+        brain=build_brain(resolved),
     )
 
 
@@ -397,6 +415,244 @@ async def _address_of(tokens: dict[str, object], settings: Settings) -> str:
     )
     transport = GmailTransport.from_credentials(credentials, settings)
     return await transport.connected_address()
+
+
+# --------------------------------------------------------------------------- #
+# Starting a production
+# --------------------------------------------------------------------------- #
+#
+# The same three steps the tick service has had since Phase 3, with two
+# differences that are the whole reason they are duplicated as routes rather
+# than shared as ones: the caller is authenticated, and the owner is the caller.
+#
+# The work itself is not duplicated. `orchestrator/intake.py` holds it, and both
+# services call the same functions — the DRAFT gate that catches a hallucinated
+# prop before it becomes an email exists once.
+
+
+class NewProject(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    budget_baseline: Money | None = None
+
+
+class ProjectStarted(BaseModel):
+    project_id: str
+    title: str
+
+
+class UploadScript(BaseModel):
+    """Either text, or a file. Not both, and not neither.
+
+    A file arrives base64-encoded rather than as multipart because everything
+    else this service speaks is JSON, and one encoding is worth the third of a
+    payload it costs.
+    """
+
+    filename: str = "script.txt"
+    mime_type: str = "text/plain"
+    text_content: str = ""
+    content_b64: str = ""
+
+
+class FoundProp(BaseModel):
+    item_id: str
+    name: str
+    category: str
+    qty: int
+    consumable: bool
+    confidence: float
+    scenes: list[str]
+    lines: list[str]
+    """The script lines it was found in. The receipt."""
+
+
+class ScriptRead(BaseModel):
+    props: list[FoundProp]
+
+
+class ConfirmedItem(BaseModel):
+    item_id: str
+    qty: int = Field(ge=1, default=1)
+    include: bool = True
+    floor_price: Money | None = None
+
+
+class ConfirmItems(BaseModel):
+    items: list[ConfirmedItem]
+
+
+class ItemsConfirmed(BaseModel):
+    confirmed: list[str]
+    abandoned: list[str]
+
+
+async def _owned(
+    services: ApiServices, project_id: str, producer: Producer
+) -> ProjectRecord:
+    """Same check `_digest_for` makes, for the routes that do not build one.
+
+    The admin SDK bypasses `firestore.rules` entirely, so this is the boundary
+    for anything reaching Firestore from here — the rules constrain the
+    browser, not this service. A missing project and somebody else's return the
+    same 404 on purpose: distinguishing them tells a caller whether an id
+    exists, which is not theirs to learn.
+    """
+    project = await services.repo.get_project(project_id)
+    if project is None or project.owner_uid != producer.uid:
+        raise HTTPException(status_code=404, detail=f"no project {project_id}")
+    return project
+
+
+@app.post("/projects", status_code=201)
+async def start_project(
+    request: Request, body: NewProject, producer: Signed
+) -> ProjectStarted:
+    """Start a production, owned by whoever asked for it.
+
+    The owner is the authenticated caller and is not a field on the body. The
+    tick service's version takes `owner_uid` as a string, which is right there
+    — it is called by a shell with a gcloud token — and would be a way to
+    create a production in somebody else's name here.
+    """
+    services = services_of(request)
+    project_id = _project_id_for(body.title)
+
+    for candidate in _candidates(project_id):
+        try:
+            _ = await intake.create_project(
+                services.repo,
+                services.clock,
+                project_id=candidate,
+                title=body.title,
+                owner_uid=producer.uid,
+                budget_baseline=body.budget_baseline,
+            )
+        except AlreadyExists:
+            # `create()` refuses a clash rather than overwriting, so two
+            # productions called "Nightfall" get distinct ids instead of one
+            # quietly replacing the other's screenplay.
+            continue
+        log.info(
+            "project started",
+            extra={"project_id": candidate, "uid": producer.uid},
+        )
+        return ProjectStarted(project_id=candidate, title=body.title)
+
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Too many productions with that name already. Give this one a "
+            "title of its own."
+        ),
+    )
+
+
+@app.post("/projects/{project_id}/script")
+async def upload_script(
+    request: Request, project_id: str, body: UploadScript, producer: Signed
+) -> ScriptRead:
+    """Read a screenplay into DRAFT props for the producer to confirm.
+
+    Nothing is researched and nobody is emailed until they do. That gap is
+    where a prop the model invented is caught, before it becomes a real message
+    to a real seller.
+    """
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    if body.content_b64:
+        try:
+            text = decode_upload(
+                filename=body.filename,
+                mime_type=body.mime_type,
+                content_b64=body.content_b64,
+            )
+        except UnreadableScriptError as exc:
+            # 422 rather than 400: the request was well formed, the file was
+            # not readable. The message is written for the producer and is
+            # rendered as-is.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        text = body.text_content
+
+    if not text.strip():
+        raise HTTPException(
+            status_code=422, detail="There is no screenplay text to read."
+        )
+
+    found = await intake.read_script(
+        services.repo,
+        services.clock,
+        services.brain,
+        project_id=project_id,
+        source=ScriptSource(
+            filename=body.filename,
+            mime_type=body.mime_type,
+            text_content=text,
+        ),
+    )
+    log.info(
+        "script read",
+        extra={"project_id": project_id, "uid": producer.uid, "props": len(found)},
+    )
+    return ScriptRead(props=[FoundProp(**asdict(prop)) for prop in found])
+
+
+@app.post("/projects/{project_id}/items/confirm")
+async def confirm_items(
+    request: Request, project_id: str, body: ConfirmItems, producer: Signed
+) -> ItemsConfirmed:
+    """The producer signs off the list. Only now does anything start moving."""
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    try:
+        result = await intake.confirm_items(
+            services.repo,
+            services.clock,
+            project_id=project_id,
+            choices=[
+                intake.Choice(
+                    item_id=c.item_id,
+                    qty=c.qty,
+                    include=c.include,
+                    floor_price=c.floor_price,
+                )
+                for c in body.items
+            ],
+        )
+    except intake.UnknownItemError as exc:
+        raise HTTPException(status_code=404, detail=f"no item {exc.args[0]}") from exc
+
+    log.info(
+        "items confirmed",
+        extra={
+            "project_id": project_id,
+            "uid": producer.uid,
+            "confirmed": len(result.confirmed),
+            "abandoned": len(result.abandoned),
+        },
+    )
+    return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
+
+
+def _project_id_for(title: str) -> str:
+    """A readable id from the title.
+
+    Readable because it is in every log line, every Firestore path and the URL
+    a producer might paste to a colleague. A uuid would never collide and would
+    make all of those unreadable, so this collides and handles it instead.
+    """
+    slug = "".join(c if c.isalnum() else "-" for c in title.lower())
+    slug = "-".join(part for part in slug.split("-") if part)[:48]
+    # The pattern the tick service's route enforces: must start alphanumeric,
+    # at least two characters.
+    return slug if len(slug) >= 2 and slug[0].isalnum() else f"p-{slug}"[:48]
+
+
+def _candidates(base: str) -> list[str]:
+    """The id, then a few numbered variants. Bounded, so a loop cannot run away."""
+    return [base] + [f"{base}-{n}" for n in range(2, 12)]
 
 
 # --------------------------------------------------------------------------- #

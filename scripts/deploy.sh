@@ -461,25 +461,35 @@ else
   ok "secretAccessor for $AGENT_SA — reads producer tokens, creates none"
 fi
 
-# Vertex AI, for the tick service only — it is the one that reasons.
+# Vertex AI, for both services that reason.
 #
 # This is what replaces a Gemini API key: the account authenticates as itself,
 # so there is no key to store or rotate and nothing secret in the deployed
 # environment. roles/aiplatform.user is the smallest role that can call a
 # published model; it does not permit training, tuning or model management.
 #
+# The tick negotiates and researches. The api service reads screenplays —
+# extract_props is a Gemini call, and it is the service a producer's browser
+# can reach — so it needs the same grant. Without it a script upload fails at
+# request time with a permission error from deep inside the SDK, which is a
+# long way from "the producer dropped a PDF on the page".
+#
 # Granted whether or not BRAIN_BACKEND is main-agent, so that switching the
 # brain on later is one variable rather than a variable and an IAM change
 # nobody remembers.
-if has_role "$AGENT_EMAIL" "roles/aiplatform.user"; then
-  skip "aiplatform.user for $AGENT_SA"
-else
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${AGENT_EMAIL}" \
-    --role="roles/aiplatform.user" \
-    --condition=None >/dev/null
-  ok "aiplatform.user for $AGENT_SA — Gemini through Vertex, no API key"
-fi
+for reasoner in "$AGENT_SA:$AGENT_EMAIL" "$API_SA:$API_EMAIL"; do
+  reasoner_sa="${reasoner%%:*}"
+  reasoner_email="${reasoner#*:}"
+  if has_role "$reasoner_email" "roles/aiplatform.user"; then
+    skip "aiplatform.user for $reasoner_sa"
+  else
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+      --member="serviceAccount:${reasoner_email}" \
+      --role="roles/aiplatform.user" \
+      --condition=None >/dev/null
+    ok "aiplatform.user for $reasoner_sa — Gemini through Vertex, no API key"
+  fi
+done
 
 # Reading the token secret is the tick service's business only. The approvals
 # service never sends mail.
@@ -570,6 +580,16 @@ if [[ -n "$PARALLEL_API_KEY" ]]; then
   # Not prefixed CINEMA_: the Parallel SDK reads this name itself.
   TICK_ENV="${TICK_ENV}@PARALLEL_API_KEY=${PARALLEL_API_KEY}"
 fi
+# The api service reads screenplays, so it needs the same brain configuration
+# the tick has — but not PARALLEL_API_KEY. Only research_item searches the web,
+# and that runs on the tick; a key here would be a credential in an environment
+# that has no use for it.
+API_BRAIN_ENV="@CINEMA_BRAIN_BACKEND=${BRAIN_BACKEND}"
+API_BRAIN_ENV="${API_BRAIN_ENV}@CINEMA_GEMINI_MODEL=${GEMINI_MODEL}"
+API_BRAIN_ENV="${API_BRAIN_ENV}@GOOGLE_GENAI_USE_VERTEXAI=true"
+API_BRAIN_ENV="${API_BRAIN_ENV}@GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
+API_BRAIN_ENV="${API_BRAIN_ENV}@GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION}"
+
 API_OAUTH_ENV=""
 if [[ -n "$OAUTH_CLIENT_ID" ]]; then
   TICK_ENV="${TICK_ENV}@CINEMA_OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}"
@@ -636,7 +656,7 @@ gcloud run deploy "$API_SERVICE" \
   --timeout=60s \
   --max-instances=2 \
   --memory=512Mi \
-  --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_LOG_FORMAT=json@CINEMA_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}@CINEMA_TOKEN_BACKEND=secret-manager@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}${API_OAUTH_ENV}" \
+  --set-env-vars="^@^CINEMA_GCP_PROJECT=${PROJECT_ID}@CINEMA_LOG_FORMAT=json@CINEMA_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}@CINEMA_TOKEN_BACKEND=secret-manager@CINEMA_REFRESH_TOKEN_SECRET=${TOKEN_SECRET}${API_BRAIN_ENV}${API_OAUTH_ENV}" \
   --quiet >/dev/null
 ok "$API_SERVICE  (orchestrator.api:app, as $API_SA)"
 

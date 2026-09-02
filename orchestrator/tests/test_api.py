@@ -14,6 +14,7 @@ can be replayed, reused, or outlived, somebody attaches their mailbox to
 another producer's account — or has the agent send as them.
 """
 
+import base64
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
@@ -26,6 +27,7 @@ from cinema_contracts import (
     NegotiationState,
     SceneMention,
 )
+from cinema_contracts.testing import ScriptedBrain
 from conftest import TokenMinter
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.api import ApiServices, app, build_api_services
@@ -54,9 +56,18 @@ SETTINGS = Settings(
 
 
 def _services(client: AsyncClient) -> ApiServices:
+    """The api service with the deterministic brain in place of Gemini.
+
+    ScriptedBrain is the same stand-in `make e2e` runs on, so these tests stay
+    offline and a script upload still exercises the whole DRAFT gate.
+    """
     repo = FirestoreRepository(client)
     return ApiServices(
-        settings=SETTINGS, client=client, repo=repo, clock=SimClock(repo)
+        settings=SETTINGS,
+        client=client,
+        repo=repo,
+        clock=SimClock(repo),
+        brain=ScriptedBrain(),
     )
 
 
@@ -371,3 +382,224 @@ async def test_chat_needs_a_producer(api: httpx.AsyncClient) -> None:
     )
 
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# Starting a production from a browser
+# --------------------------------------------------------------------------- #
+#
+# The tick service has had these three steps since Phase 3, reachable only from
+# a shell with a gcloud token and taking `owner_uid` as a plain string in the
+# body. Here the caller is authenticated and the owner is the caller, which is
+# the whole difference and the thing worth testing.
+
+SCREENPLAY = """SCENE 1
+
+INT. KOPITIAM - NIGHT
+
+Razak grabs the cup and throws it at the mirror.
+"""
+
+
+def _script_body(text: str = SCREENPLAY) -> dict[str, object]:
+    return {"filename": "script.txt", "mime_type": "text/plain", "text_content": text}
+
+
+async def _start(
+    api: httpx.AsyncClient, headers: dict[str, str], title: str = "Nightfall"
+) -> str:
+    reply = await api.post("/projects", headers=headers, json={"title": title})
+    assert reply.status_code == 201, reply.text
+    return str(reply.json()["project_id"])
+
+
+async def test_a_production_belongs_to_whoever_started_it(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """The owner is the token, not a body field.
+
+    The tick service's version takes owner_uid as a string — correct there,
+    since a shell calls it — and would be a way to create a production in
+    somebody else's name from a browser.
+    """
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+
+    project_id = await _start(api, headers)
+
+    record = await FirestoreRepository(firestore).get_project(project_id)
+    assert record is not None
+    assert record.owner_uid == uid
+
+
+async def test_starting_a_production_needs_a_producer(api: httpx.AsyncClient) -> None:
+    reply = await api.post("/projects", json={"title": "Nightfall"})
+
+    assert reply.status_code == 401
+
+
+async def test_two_productions_can_share_a_title(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """`create()` refuses a clash rather than overwriting, so the second gets
+    an id of its own instead of silently replacing the first's screenplay."""
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+
+    first = await _start(api, headers)
+    second = await _start(api, headers)
+
+    assert first != second
+
+
+async def test_a_script_becomes_draft_props_and_nothing_else(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """DRAFT is inert. Nothing is researched and nobody is emailed until a
+    producer confirms — the gap where an invented prop is caught."""
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+
+    reply = await api.post(
+        f"/projects/{project_id}/script", headers=headers, json=_script_body()
+    )
+
+    assert reply.status_code == 200, reply.text
+    names = {p["name"] for p in reply.json()["props"]}
+    assert {"cup", "mirror"} <= names
+
+    items = await FirestoreRepository(firestore).list_items(project_id)
+    assert items
+    assert all(item.status is ItemStatus.DRAFT for item in items.values())
+    assert all(item.next_action_due_at is None for item in items.values())
+
+
+async def test_every_prop_carries_the_line_it_came_from(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """The receipt. A prop with no line is one a producer cannot check, and is
+    the cheapest possible tell for one that was never in the script."""
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+
+    props = (
+        await api.post(
+            f"/projects/{project_id}/script", headers=headers, json=_script_body()
+        )
+    ).json()["props"]
+
+    assert props
+    assert all(p["lines"] for p in props)
+
+
+async def test_confirming_is_what_starts_the_work(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+    props = (
+        await api.post(
+            f"/projects/{project_id}/script", headers=headers, json=_script_body()
+        )
+    ).json()["props"]
+    keep, *drop = sorted(str(p["item_id"]) for p in props)
+
+    reply = await api.post(
+        f"/projects/{project_id}/items/confirm",
+        headers=headers,
+        json={
+            "items": [{"item_id": keep, "qty": 3, "include": True}]
+            + [{"item_id": i, "include": False} for i in drop]
+        },
+    )
+
+    assert reply.status_code == 200, reply.text
+    repo = FirestoreRepository(firestore)
+    kept = await repo.get_item(project_id, keep)
+    assert kept is not None
+    assert kept.status is ItemStatus.RESEARCHING
+    assert kept.qty == 3
+    # Due immediately: confirming is the producer saying go.
+    assert kept.next_action_due_at is not None
+
+    for item_id in drop:
+        dropped = await repo.get_item(project_id, item_id)
+        assert dropped is not None
+        # Abandoned, not deleted — the breakdown still shows what the script
+        # asked for and what was left out.
+        assert dropped.status is ItemStatus.ABANDONED
+
+
+async def test_a_stranger_cannot_upload_a_script_to_your_production(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """The admin SDK bypasses firestore.rules, so this check is the boundary.
+
+    404 rather than 403, matching /chat: distinguishing "not yours" from "no
+    such project" tells a caller whether an id exists.
+    """
+    owner = tokens.create("owner@example.invalid")
+    owner_headers = {
+        "Authorization": f"Bearer {tokens.grant(owner, 'owner@example.invalid')}"
+    }
+    project_id = await _start(api, owner_headers)
+
+    stranger = tokens.create("stranger@example.invalid")
+    stranger_headers = {
+        "Authorization": f"Bearer {tokens.grant(stranger, 'stranger@example.invalid')}"
+    }
+
+    upload = await api.post(
+        f"/projects/{project_id}/script",
+        headers=stranger_headers,
+        json=_script_body(),
+    )
+    confirm = await api.post(
+        f"/projects/{project_id}/items/confirm",
+        headers=stranger_headers,
+        json={"items": []},
+    )
+
+    assert upload.status_code == 404
+    assert confirm.status_code == 404
+
+
+async def test_an_unreadable_upload_says_so_rather_than_finding_no_props(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """A scanned PDF reaching the brain as an empty string comes back as a
+    confident list of no props, which reads exactly like a screenplay that
+    needed nothing bought."""
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+
+    reply = await api.post(
+        f"/projects/{project_id}/script",
+        headers=headers,
+        json={
+            "filename": "scan.pdf",
+            "mime_type": "application/pdf",
+            "content_b64": base64.b64encode(b"not a pdf at all").decode(),
+        },
+    )
+
+    assert reply.status_code == 422
+    assert "scan.pdf" in reply.json()["detail"]
+
+
+async def test_an_empty_script_is_refused(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    uid = tokens.create("owner@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.grant(uid, 'owner@example.invalid')}"}
+    project_id = await _start(api, headers)
+
+    reply = await api.post(
+        f"/projects/{project_id}/script", headers=headers, json=_script_body("   \n")
+    )
+
+    assert reply.status_code == 422

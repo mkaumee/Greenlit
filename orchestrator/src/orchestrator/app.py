@@ -33,7 +33,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from cinema_contracts import AgentBrain, Money, ScriptSource
@@ -43,7 +43,8 @@ from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1 import AsyncClient
 from pydantic import BaseModel, Field
 
-from orchestrator.clock import SimClock, initial_state
+from orchestrator import intake
+from orchestrator.clock import SimClock
 from orchestrator.gmail import GmailTransport, build_credentials, token_store_for
 from orchestrator.logs import configure_logging
 from orchestrator.mail import InMemoryMailbox, MailTransport
@@ -52,10 +53,8 @@ from orchestrator.mailboxes import (
     ProducerMailboxes,
     SingleMailbox,
 )
-from orchestrator.records import ItemRecord, ItemStatus, ProjectRecord
 from orchestrator.repository import FirestoreRepository
 from orchestrator.settings import BrainBackend, MailBackend, Settings
-from orchestrator.sourcing import item_id_for
 from orchestrator.tick import TickLoop, TickReport
 
 log = logging.getLogger("orchestrator")
@@ -433,19 +432,15 @@ class ItemsConfirmed(BaseModel):
 @app.post("/projects", status_code=201)
 async def create_project(request: Request, body: CreateProject) -> ProjectCreated:
     services = services_of(request)
-    real_now = services.clock.real_now()
-    sim_start = body.sim_start or real_now
-
     try:
-        await services.repo.create_project(
-            body.project_id,
-            ProjectRecord(
-                title=body.title,
-                clock=initial_state(sim_start, real_now),
-                budget_baseline=body.budget_baseline,
-                created_at=sim_start,
-                owner_uid=body.owner_uid,
-            ),
+        sim_start = await intake.create_project(
+            services.repo,
+            services.clock,
+            project_id=body.project_id,
+            title=body.title,
+            owner_uid=body.owner_uid,
+            sim_start=body.sim_start,
+            budget_baseline=body.budget_baseline,
         )
     except AlreadyExists as exc:
         raise HTTPException(
@@ -461,96 +456,53 @@ async def upload_script(
 ) -> ScriptRead:
     """Read a screenplay and offer back the physical things the scenes need.
 
-    Persists what it finds as ``DRAFT`` items, which are inert: nothing is
-    researched and nobody is emailed until a producer confirms the list. That
-    gap is the point — it is where a hallucinated prop gets caught, before it
-    turns into a real message to a real seller.
+    The work is in ``intake.read_script``, shared with the producer-facing
+    service, so the DRAFT gate that catches a hallucinated prop exists once
+    rather than twice.
     """
     services = services_of(request)
     if await services.repo.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail=f"no project {project_id}")
 
-    now = await services.clock.now(project_id)
-    drafts = await services.brain.extract_props(
-        ScriptSource(
+    found = await intake.read_script(
+        services.repo,
+        services.clock,
+        services.brain,
+        project_id=project_id,
+        source=ScriptSource(
             filename=body.filename,
             mime_type=body.mime_type,
             text_content=body.text_content,
-        )
+        ),
     )
-
-    found: list[FoundProp] = []
-    for draft in drafts:
-        item_id = item_id_for(draft.name)
-        scenes = [m.scene_number for m in draft.mentions]
-        await services.repo.save_item(
-            project_id,
-            item_id,
-            ItemRecord(
-                name=draft.name,
-                category=draft.category,
-                scenes=scenes,
-                qty=draft.qty,
-                notes=draft.notes,
-                mentions=list(draft.mentions),
-                consumable=draft.consumable,
-                status=ItemStatus.DRAFT,
-                updated_at=now,
-            ),
-        )
-        found.append(
-            FoundProp(
-                item_id=item_id,
-                name=draft.name,
-                category=draft.category,
-                qty=draft.qty,
-                consumable=draft.consumable,
-                confidence=draft.confidence,
-                scenes=scenes,
-                lines=[m.line for m in draft.mentions],
-            )
-        )
-
-    return ScriptRead(props=found)
+    return ScriptRead(props=[FoundProp(**asdict(prop)) for prop in found])
 
 
 @app.post("/projects/{project_id}/items/confirm")
 async def confirm_items(
     request: Request, project_id: str, body: ConfirmItems
 ) -> ItemsConfirmed:
-    """The producer signs off the list. Only now does anything start moving.
-
-    Quantity is set here rather than by the agent because a consumable prop
-    needs one per take, and only a person knows how many takes the schedule
-    allows. Everything left out is abandoned rather than deleted, so the
-    breakdown still shows what the script asked for and what was dropped.
-    """
+    """The producer signs off the list. Only now does anything start moving."""
     services = services_of(request)
-    now = await services.clock.now(project_id)
+    try:
+        result = await intake.confirm_items(
+            services.repo,
+            services.clock,
+            project_id=project_id,
+            choices=[
+                intake.Choice(
+                    item_id=c.item_id,
+                    qty=c.qty,
+                    include=c.include,
+                    floor_price=c.floor_price,
+                )
+                for c in body.items
+            ],
+        )
+    except intake.UnknownItemError as exc:
+        raise HTTPException(status_code=404, detail=f"no item {exc.args[0]}") from exc
 
-    confirmed: list[str] = []
-    abandoned: list[str] = []
-
-    for choice in body.items:
-        item = await services.repo.get_item(project_id, choice.item_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail=f"no item {choice.item_id}")
-
-        item.updated_at = now
-        if choice.include:
-            item.qty = choice.qty
-            item.floor_price = choice.floor_price
-            item.status = ItemStatus.RESEARCHING
-            item.next_action_due_at = now
-            confirmed.append(choice.item_id)
-        else:
-            item.status = ItemStatus.ABANDONED
-            item.next_action_due_at = None
-            abandoned.append(choice.item_id)
-
-        await services.repo.save_item(project_id, choice.item_id, item)
-
-    return ItemsConfirmed(confirmed=confirmed, abandoned=abandoned)
+    return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
 
 
 @app.post("/tick")
