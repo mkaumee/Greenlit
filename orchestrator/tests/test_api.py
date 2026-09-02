@@ -91,6 +91,33 @@ def _auth(
     return {"Authorization": f"Bearer {tokens.mint(email, role='producer')}"}
 
 
+async def test_health_says_which_brain_is_wired(api: httpx.AsyncClient) -> None:
+    """The question "is the agent actually connected to the chat" needs an
+    answer that is not "read the prose and guess".
+
+    The tick has reported this since Phase 3 and this service did not, which is
+    backwards: the tick is private, and this is the one a producer's browser
+    talks to. A deployment still running the keyword matcher looks exactly like
+    one that is not, right up until somebody asks it something interesting.
+    """
+    body = (await api.get("/health")).json()
+
+    assert body["status"] == "ok"
+    assert body["brain_backend"] == SETTINGS.brain_backend.value
+
+
+async def test_health_does_not_report_what_this_service_does_not_do(
+    api: httpx.AsyncClient,
+) -> None:
+    """No mail_backend, no research_web_search. This service sends no mail and
+    searches nothing, and a health endpoint reporting fields its service does
+    not use is one people stop reading."""
+    body = (await api.get("/health")).json()
+
+    assert "mail_backend" not in body
+    assert "research_web_search" not in body
+
+
 # --------------------------------------------------------------------------- #
 # Starting a consent
 # --------------------------------------------------------------------------- #

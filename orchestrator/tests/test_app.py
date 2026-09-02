@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from cinema_contracts import ClockMode, NegotiationState
+from cinema_contracts import AgentBrain, ClockMode, NegotiationState
 from cinema_contracts.testing import ScriptedBrain
 from fastapi import HTTPException
 from google.cloud.firestore_v1 import AsyncClient
@@ -483,8 +483,35 @@ def test_the_real_brain_refuses_to_start_without_a_research_key(
         brain_backend=BrainBackend.MAIN_AGENT,
     )
 
+    # Default rather than needs_research=True, so a caller that forgets the
+    # flag entirely still gets the check.
     with pytest.raises(RuntimeError, match="PARALLEL_API_KEY"):
         _ = build_brain(settings)
+
+
+def test_a_service_that_does_not_research_needs_no_research_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cinema-api` reads screenplays and briefs producers. It never calls
+    `research_item`, which is the only capability that searches the web.
+
+    This is a regression. `deploy.sh` gives that service
+    CINEMA_BRAIN_BACKEND=main-agent and deliberately no PARALLEL_API_KEY —
+    correctly, since a key there would be a credential in an environment with
+    no use for it — while `build_brain` demanded one unconditionally. The
+    result was a container that raised during startup, taking chat, mailbox
+    connect and script upload down together on the next deploy.
+    """
+    _vertex_configured(monkeypatch)
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        brain_backend=BrainBackend.MAIN_AGENT,
+    )
+
+    brain = build_brain(settings, needs_research=False)
+
+    assert isinstance(brain, AgentBrain)
 
 
 def test_the_scripted_brain_needs_no_keys(monkeypatch: pytest.MonkeyPatch) -> None:

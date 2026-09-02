@@ -55,7 +55,7 @@ from google.cloud.firestore_v1 import AsyncClient
 from pydantic import BaseModel, Field
 
 from orchestrator import intake
-from orchestrator.app import build_brain
+from orchestrator.app import build_brain, gemini_credentials_route
 from orchestrator.auth import Producer, init_firebase, require_producer
 from orchestrator.briefing import summarise
 from orchestrator.clock import SimClock
@@ -75,7 +75,7 @@ from orchestrator.scripts import (
     decode_upload,
     is_document,
 )
-from orchestrator.settings import GMAIL_SCOPES, Settings
+from orchestrator.settings import GMAIL_SCOPES, BrainBackend, Settings
 
 log = logging.getLogger("orchestrator.api")
 
@@ -119,7 +119,11 @@ def build_api_services(settings: Settings | None = None) -> ApiServices:
         client=client,
         repo=repo,
         clock=SimClock(repo),
-        brain=build_brain(resolved),
+        # No research key, and none needed: this service reads screenplays and
+        # briefs producers. `research_item` is the only capability that
+        # searches the web and it runs on the tick, so a PARALLEL_API_KEY here
+        # would be a credential in an environment with no use for it.
+        brain=build_brain(resolved, needs_research=False),
     )
 
 
@@ -169,11 +173,36 @@ def services_of(request: Request) -> ApiServices:
 class Health(BaseModel):
     status: str
     project: str
+    brain_backend: str = ""
+    gemini_model: str = ""
+    gemini_credentials: str = ""
 
 
 @app.get("/health")
 async def health(request: Request) -> Health:
-    return Health(status="ok", project=services_of(request).settings.gcp_project)
+    """Says which brain is wired, not just that the process is alive.
+
+    The tick's ``/health`` has reported this since Phase 3 and this one did
+    not, which is backwards: the tick is private and this is the service a
+    producer's browser talks to. Without it, "is the agent actually connected
+    to the chat" is a question you answer by reading the prose and guessing,
+    and a deployment still running the keyword matcher looks exactly like one
+    that is not.
+
+    Deliberately narrower than the tick's. No ``mail_backend`` and no
+    ``research_web_search``: this service sends no mail and searches nothing,
+    and a health endpoint reporting fields its service does not use is one
+    people stop believing.
+    """
+    settings = services_of(request).settings
+    real_brain = settings.brain_backend is BrainBackend.MAIN_AGENT
+    return Health(
+        status="ok",
+        project=settings.gcp_project,
+        brain_backend=settings.brain_backend.value,
+        gemini_model=settings.gemini_model if real_brain else "",
+        gemini_credentials=gemini_credentials_route() if real_brain else "",
+    )
 
 
 # --------------------------------------------------------------------------- #

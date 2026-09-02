@@ -120,8 +120,13 @@ def build_mailboxes(
     return SingleMailbox(fallback)
 
 
-def _gemini_credentials() -> str:
-    """Which route Gemini authenticates by, for reporting on /health."""
+def gemini_credentials_route() -> str:
+    """Which route Gemini authenticates by, for reporting on /health.
+
+    Public because both services report it: the tick and the producer-facing
+    api. One implementation, so the two cannot disagree about how the same
+    process is authenticating.
+    """
     if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {"true", "1"}:
         return "vertex"
     if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
@@ -129,8 +134,15 @@ def _gemini_credentials() -> str:
     return ""
 
 
-def build_brain(settings: Settings) -> AgentBrain:
+def build_brain(settings: Settings, *, needs_research: bool = True) -> AgentBrain:
     """The reasoning half. Role A's, or the fake standing in for it.
+
+    ``needs_research`` says whether this service will call ``research_item``,
+    which is the only capability that searches the web. The tick does; the
+    producer-facing api reads screenplays and briefs producers and does not, so
+    it is built without a research key rather than handed one it has no use
+    for. Defaulted to True so a new caller has to say it does not need
+    research, rather than silently losing the check by forgetting a flag.
 
     ``main-agent`` is merged; the default is still the deterministic fake,
     because reasoning that emails real sellers should be switched on
@@ -191,7 +203,7 @@ def build_brain(settings: Settings) -> AgentBrain:
                 "would fail — at request time, one negotiation at a time."
             )
 
-        if not os.environ.get("PARALLEL_API_KEY"):
+        if needs_research and not os.environ.get("PARALLEL_API_KEY"):
             raise RuntimeError(
                 "CINEMA_BRAIN_BACKEND=main-agent, but PARALLEL_API_KEY is not "
                 "set. Item research would still answer — without any web "
@@ -358,7 +370,7 @@ async def health(request: Request) -> Health:
         status="ok",
         brain_backend=settings.brain_backend.value,
         gemini_model=settings.gemini_model if real_brain else "",
-        gemini_credentials=_gemini_credentials() if real_brain else "",
+        gemini_credentials=gemini_credentials_route() if real_brain else "",
         research_web_search=real_brain and bool(os.environ.get("PARALLEL_API_KEY")),
         mail_backend=settings.mail_backend.value,
         token_backend=settings.token_backend.value,
