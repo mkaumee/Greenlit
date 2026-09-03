@@ -35,7 +35,7 @@ from cinema_contracts import (
 from cinema_contracts.testing import ScriptedBrain
 from conftest import TokenMinter
 from google.cloud.firestore_v1 import AsyncClient
-from orchestrator.api import ApiServices, app, build_api_services
+from orchestrator.api import MAX_REASON, ApiServices, app, build_api_services
 from orchestrator.auth import init_firebase
 from orchestrator.clock import ClockState, SimClock
 from orchestrator.records import (
@@ -828,6 +828,8 @@ async def test_a_failing_brain_falls_back_and_says_so(
     # Still a real answer, read from Firestore rather than reasoned about.
     assert "Ah Seng Rentals" in body["text"]
     assert body["waiting_on_you"] == 1
+    # And it says why, rather than leaving that in Cloud Logging.
+    assert body["fallback_reason"] == "RuntimeError: the model is down"
 
 
 async def test_an_empty_briefing_falls_back_rather_than_saying_nothing(
@@ -866,3 +868,75 @@ async def test_the_brain_is_only_handed_the_producers_own_production(
     question = brain.asked[0]
     assert question.project_id == project_id
     assert {n.negotiation_id for n in question.negotiations} == {"neg1"}
+
+
+async def test_a_long_failure_is_cut_down_to_something_readable(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """A gRPC error can be kilobytes of retry metadata on one line.
+
+    Two things shorten it and they are not the same: taking the first line, and
+    capping what is left. A test whose first line is already short passes with
+    the cap removed, so this one has no newline in it at all.
+    """
+    headers, project_id = await _ask(api, tokens, firestore)
+
+    @final
+    class _Verbose:
+        def __getattr__(self, name: str) -> object:
+            return getattr(ScriptedBrain(), name)
+
+        async def brief_producer(self, _question: ProducerQuestion) -> ProducerBriefing:
+            raise RuntimeError("503 Deadline exceeded. " + "retry metadata " * 300)
+
+    _with_brain(firestore, _Verbose())
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "what needs me?"},
+        )
+    ).json()
+
+    assert body["fallback_reason"].startswith("RuntimeError: 503 Deadline exceeded.")
+    assert len(body["fallback_reason"]) == MAX_REASON
+
+
+async def test_an_answer_from_the_agent_carries_no_reason(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Otherwise every good answer grows a disclaimer."""
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(firestore, _Briefer(ProducerBriefing(text="Push Skyline once more.")))
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "should I push?"},
+        )
+    ).json()
+
+    assert body["source"] == "agent"
+    assert body["fallback_reason"] == ""
+
+
+async def test_an_empty_briefing_says_it_was_empty(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Not an exception, and just as much a failure. Named separately because
+    "empty answer" and "Vertex refused" need different fixes."""
+    headers, project_id = await _ask(api, tokens, firestore)
+    _with_brain(firestore, _Briefer(ProducerBriefing(text="   ")))
+
+    body = (
+        await api.post(
+            "/chat",
+            headers=headers,
+            json={"project_id": project_id, "question": "what needs me?"},
+        )
+    ).json()
+
+    assert body["source"] == "stored-facts"
+    assert "empty" in body["fallback_reason"].lower()

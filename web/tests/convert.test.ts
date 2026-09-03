@@ -162,12 +162,13 @@ describe("directionOf", () => {
 });
 
 describe("a briefing that did not come from the brain", () => {
-  const briefing = (fromStoredFacts?: boolean): Row => ({
+  const briefing = (fromStoredFacts?: boolean, reason?: string): Row => ({
     kind: "briefing",
     id: "b-1",
     text: "Nothing needs you right now.",
     refs: [],
     fromStoredFacts,
+    reason,
     at: AT,
   });
 
@@ -193,5 +194,29 @@ describe("a briefing that did not come from the brain", () => {
     // Optional so an older row shape still renders, and the default has to be
     // the quiet one or every answer carries a disclaimer.
     expect(textOf(briefing())).not.toContain("stored records");
+  });
+
+  it("shows why the agent could not answer", () => {
+    // The whole point. "The agent did not answer this one" with no reason is
+    // a diagnosis that costs a trip through Cloud Logging every time, and the
+    // person reading this screen is the one who deployed it.
+    const text = textOf(briefing(true, "NotFound: Publisher Model not found"));
+
+    expect(text).toContain("stored records");
+    expect(text).toContain("NotFound: Publisher Model not found");
+  });
+
+  it("says nothing extra when there is no reason to give", () => {
+    const text = textOf(briefing(true, ""));
+
+    expect(text).toContain("stored records");
+    expect(text.trimEnd().endsWith("answer this one.")).toBe(true);
+  });
+
+  it("never attaches a reason to an answer the agent gave", () => {
+    // A reason on a working answer would be a disclaimer under every reply.
+    expect(textOf(briefing(false, "NotFound: something"))).toBe(
+      "Nothing needs you right now.",
+    );
   });
 });

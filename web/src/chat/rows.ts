@@ -43,6 +43,13 @@ export interface BriefingRow {
    * deployment whose brain is misconfigured otherwise looks exactly like one
    * that is fine — which is the failure this project keeps designing against. */
   fromStoredFacts?: boolean;
+  /** What went wrong, when the agent was asked and could not answer.
+   *
+   * On screen rather than only in Cloud Logging. "The agent did not answer
+   * this one" with no reason attached is a diagnosis that costs a round trip
+   * through the logs every single time, and the operator of a deployment is
+   * the person reading this. */
+  reason?: string;
   at: Date;
 }
 

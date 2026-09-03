@@ -21,6 +21,8 @@ export type Answer =
       waitingOnYou: number;
       /** Which half answered. Both are true; only one reasoned. */
       source: "agent" | "stored-facts";
+      /** Why the agent did not answer, when it did not. Empty when it did. */
+      fallbackReason: string;
     }
   | { kind: "signed-out"; detail: string }
   | { kind: "not-yours"; detail: string }
@@ -89,6 +91,7 @@ export async function ask(projectId: string, question: string): Promise<Answer> 
     references: Reference[];
     waiting_on_you: number;
     source?: string;
+    fallback_reason?: string;
   };
   return {
     kind: "answered",
@@ -99,6 +102,7 @@ export async function ask(projectId: string, question: string): Promise<Answer> 
     // including an older deployment that does not send the field. Claiming the
     // brain answered when it might not have is the mistake worth avoiding.
     source: body.source === "agent" ? "agent" : "stored-facts",
+    fallbackReason: body.fallback_reason ?? "",
   };
 }
 

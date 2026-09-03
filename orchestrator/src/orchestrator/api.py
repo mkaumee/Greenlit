@@ -743,6 +743,17 @@ class Answer(BaseModel):
     solely in a transcript is a purchase decision that scrolls away.
     """
 
+    fallback_reason: str = ""
+    """Why the agent did not answer, when it did not. Empty when it did.
+
+    Internal error text, shown to a signed-in producer on purpose. The producer
+    here is the operator of their own deployment; the text is what Vertex said
+    to our own call rather than anything drawn from somebody's data; and it
+    appears only once the agent has already failed, at which point withholding
+    the reason protects nothing and costs an evening of guessing. The full
+    traceback stays in the log — this is one line.
+    """
+
     source: str = "stored-facts"
     """Which half answered: ``agent`` or ``stored-facts``.
 
@@ -798,7 +809,7 @@ async def chat(request: Request, body: Ask, producer: Signed) -> Answer:
     services = services_of(request)
     digest = await _digest_for(services, body.project_id, producer)
 
-    reasoned = await _reasoned(services, digest, body.question)
+    reasoned, reason = await _reasoned(services, digest, body.question)
     if reasoned is not None:
         text, references = reasoned
         source = "agent"
@@ -819,13 +830,34 @@ async def chat(request: Request, body: Ask, producer: Signed) -> Answer:
         references=[Reference(kind=k, id=i, label=lbl) for k, i, lbl in references],
         waiting_on_you=digest.waiting_count,
         source=source,
+        fallback_reason=reason,
     )
+
+
+MAX_REASON = 300
+"""How much of a failure to put on screen.
+
+A gRPC error can be kilobytes of retry metadata. The first line is what names
+the problem; the rest belongs in the log, which has all of it."""
+
+
+def _one_line(error: Exception) -> str:
+    """The exception's class and first line, short enough to read."""
+    first = str(error).strip().splitlines()
+    detail = first[0] if first else ""
+    reason = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+    return reason[:MAX_REASON]
 
 
 async def _reasoned(
     services: ApiServices, digest: ProjectDigest, question: str
-) -> tuple[str, list[tuple[str, str, str]]] | None:
-    """Ask the brain, and check what comes back. ``None`` means fall back.
+) -> tuple[tuple[str, list[tuple[str, str, str]]] | None, str]:
+    """Ask the brain, and check what comes back.
+
+    Returns ``(answer, reason)``. A ``None`` answer means fall back, and the
+    reason says why — carried back to the caller rather than only logged,
+    because "the agent did not answer this one" with no reason attached is a
+    diagnosis that costs a round trip through Cloud Logging every time.
 
     Every id is checked against the digest that was handed over — which is the
     reason the digest was built as a boundary. An id the digest never carried
@@ -836,17 +868,20 @@ async def _reasoned(
     """
     try:
         briefing = await services.brain.brief_producer(as_question(digest, question))
-    except Exception:
+    except Exception as exc:
         # Any failure at all — a model that is down, a schema that did not
         # validate, a timeout. The deterministic summary is a true answer, so
         # there is always something to say; what must not happen is saying
         # nothing, or saying it as though the brain had spoken.
         log.warning("briefing failed, falling back to stored facts", exc_info=True)
-        return None
+        return None, _one_line(exc)
 
     text = briefing.text.strip()
     if not text:
-        return None
+        # Not an exception, and just as much a failure. Named separately
+        # because "empty answer" and "Vertex refused" need different fixes.
+        log.warning("briefing came back empty", extra={"project_id": digest.project_id})
+        return None, "The agent returned an empty answer."
 
     known = digest.known_ids()
     item_names = {i.item_id: i.name for i in digest.items}
@@ -872,4 +907,4 @@ async def _reasoned(
             "briefing cited ids the digest never carried",
             extra={"project_id": digest.project_id, "invented": invented},
         )
-    return text, references
+    return (text, references), ""

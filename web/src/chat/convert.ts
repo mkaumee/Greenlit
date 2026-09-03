@@ -36,6 +36,22 @@ export const EMAIL_TOOL = "email";
 export const DECISION_TOOL = "approve_purchase";
 export const PROPS_TOOL = "read_script";
 
+/**
+ * A briefing, plus the note saying who wrote it.
+ *
+ * The reason is appended when there is one. Both answers are true, but only
+ * one of them reasoned, and a producer looking at a screen that says nothing
+ * about the difference has no way to tell a working deployment from a broken
+ * one — which is exactly how this feature came to be needed.
+ */
+function briefingText(row: Extract<Row, { kind: "briefing" }>): string {
+  if (row.fromStoredFacts !== true) return row.text;
+
+  const note = "— read from stored records; the agent did not answer this one.";
+  const why = row.reason !== undefined && row.reason !== "" ? `\n  ${row.reason}` : "";
+  return `${row.text}\n\n${note}${why}`;
+}
+
 export function toThreadMessage(row: Row): ThreadMessageLike {
   switch (row.kind) {
     case "producer":
@@ -53,9 +69,7 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
         content: [
           {
             type: "text",
-            text: row.fromStoredFacts === true
-              ? `${row.text}\n\n— read from stored records; the agent did not answer this one.`
-              : row.text,
+            text: briefingText(row),
           },
         ],
         createdAt: row.at,

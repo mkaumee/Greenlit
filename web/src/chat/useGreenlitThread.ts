@@ -148,6 +148,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
             refs: answer.kind === "answered" ? answer.refs : [],
             fromStoredFacts:
               answer.kind === "answered" && answer.source === "stored-facts",
+            reason: answer.kind === "answered" ? answer.fallbackReason : "",
             at: repliedAt,
           },
         ]);
