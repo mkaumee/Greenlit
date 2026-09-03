@@ -77,13 +77,45 @@ class SupplierCandidate(_Frozen):
     notes: str = ""
 
 
-class BreakdownSource(_Frozen):
-    """An uploaded screenplay, before anyone has read it for objects."""
+class ScriptSource(_Frozen):
+    """An uploaded screenplay, before anyone has read it for objects.
+
+    Text or bytes, never both and never neither.
+
+    ``content_b64`` exists because a screenplay is a layout format — scene
+    headings at the margin, character names centred, dialogue indented — and
+    flattening a PDF to a string before the model sees it throws that away.
+    Role A hands the document to Gemini as an attachment instead, which also
+    means a scanned script works: the model reads the page, and an extractor
+    would have found no text layer and given up.
+
+    Role A must exclude ``content_b64`` from any prompt text it builds. A
+    megabyte of base64 in the prose is not a document to a model; it is noise
+    it may well try to read.
+    """
 
     filename: str
     mime_type: str
     text_content: str = ""
+    content_b64: str = ""
+    """The file itself, for formats that are not usefully text: PDF today."""
     gcs_uri: str = ""
+    """Unused. The door for a screenplay too large to inline."""
+
+    @override
+    def model_post_init(self, _context: object, /) -> None:
+        has_text = bool(self.text_content.strip())
+        has_bytes = bool(self.content_b64.strip())
+        if has_text == has_bytes:
+            # Neither is the failure this whole area keeps circling: an empty
+            # source comes back as a confident list of no props, which reads
+            # exactly like a screenplay that needs nothing bought. Both is two
+            # sources of truth for one screenplay, and nothing says which wins.
+            raise ValueError(
+                "ScriptSource needs exactly one of text_content or "
+                "content_b64. Neither means the brain would be asked to read "
+                "nothing and would answer anyway; both means two screenplays."
+            )
 
 
 class SceneMention(_Frozen):
@@ -100,7 +132,7 @@ class SceneMention(_Frozen):
     page: int | None = None
 
 
-class ItemDraft(_Frozen):
+class PropDraft(_Frozen):
     """One physical thing a scene needs, as found in the script.
 
     A draft because nothing is persisted until the producer confirms the list.
@@ -321,3 +353,81 @@ class NextMove(_Frozen):
                 f"{self.action} stops the negotiation for a human, so it must say "
                 f"why. Use GOOD_QUOTE when the negotiation simply succeeded."
             )
+
+
+# --------------------------------------------------------------------------- #
+# Talking to a producer
+# --------------------------------------------------------------------------- #
+
+
+class BriefingItem(_Frozen):
+    """One prop, flattened for a question about the production."""
+
+    item_id: str
+    name: str
+    status: str
+    qty: int = Field(ge=0, default=1)
+    best_quote: Money | None = None
+    reference_low: Money | None = None
+    reference_high: Money | None = None
+    script_line: str = Field(
+        default="",
+        description=(
+            "The line it was found in. The receipt, and the reason a producer "
+            "can check the agent rather than trust it."
+        ),
+    )
+
+
+class BriefingNegotiation(_Frozen):
+    """One negotiation, flattened for the same."""
+
+    negotiation_id: str
+    item_id: str
+    item_name: str
+    supplier: str
+    state: NegotiationState
+    rounds_used: int = Field(ge=0, default=0)
+    max_rounds: int = Field(ge=1, default=4)
+    first_quote: Money | None = None
+    latest_quote: Money | None = None
+    reasoning: str = Field(
+        default="",
+        description="The brain's own last explanation, so a briefing can say why.",
+    )
+    waiting_on_human: bool = False
+    escalation_reason: str = ""
+
+
+class ProducerQuestion(_Frozen):
+    """Everything the brain may draw on when answering a producer, and nothing else.
+
+    The digest is a boundary, not a convenience. Whatever is not in here cannot
+    be talked about, and the briefing that comes back is checked against the ids
+    it carried — so a model that invents a supplier or a prop is caught by
+    comparison rather than trusted. Handing over the raw collections would make
+    that check meaningless.
+
+    It is also the same data the panel reads, so the chat and the screens cannot
+    disagree about what is true.
+    """
+
+    project_id: str
+    title: str
+    question: str
+    items: list[BriefingItem] = Field(default_factory=list)
+    negotiations: list[BriefingNegotiation] = Field(default_factory=list)
+
+
+class ProducerBriefing(_Frozen):
+    """An answer, and the things it pointed at.
+
+    Prose and ids only. No field here causes a write, so the brain cannot reach
+    money even by being wrong about everything — the same reason ``ACCEPT``
+    routes to a human instead of buying.
+    """
+
+    text: str = Field(min_length=1)
+    referenced_item_ids: list[str] = Field(default_factory=list)
+    referenced_negotiation_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)

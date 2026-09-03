@@ -23,12 +23,6 @@ web/
 docs/
 scripts/
 
-# supplier-sim is a uv workspace member and never runs in this image, but uv
-# still parses every member's manifest to resolve the lockfile. Its source is
-# excluded; the one file the build genuinely needs is not.
-supplier-sim/
-!supplier-sim/pyproject.toml
-
 firestore-debug.log
 *.log
 Dockerfile

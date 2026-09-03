@@ -48,9 +48,11 @@ import {
   doc,
   getDoc,
   getDocs,
+  query,
   setDoc,
   setLogLevel,
   updateDoc,
+  where,
   type Firestore,
 } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
@@ -393,8 +395,15 @@ describe("what a browser may query", () => {
   });
 
   beforeEach(async () => {
-    await seed(main, "projects/projA", { title: "Kopitiam" });
+    await seed(main, "projects/projA", {
+      title: "Kopitiam",
+      owner_uid: PRODUCER,
+    });
     await seed(main, "projects/projA/negotiations/neg1", record("SENT"));
+    await seed(main, "projects/projB", {
+      title: "Someone Else's Film",
+      owner_uid: "a-different-producer",
+    });
     await seed(main, "projects/projB/negotiations/neg2", record("SENT"));
     await seed(main, "projects/projA/negotiations/neg1/messages/m1", {
       direction: "inbound",
@@ -402,8 +411,58 @@ describe("what a browser may query", () => {
     });
   });
 
-  it("lists the projects, so the panel can offer a choice", async () => {
-    await assertSucceeds(getDocs(collection(asProducer(main), "projects")));
+  it("lists the projects this account owns", async () => {
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(asProducer(main), "projects"),
+          where("owner_uid", "==", PRODUCER),
+        ),
+      ),
+    );
+  });
+
+  it("refuses a query for every project", async () => {
+    // How the leak was found: signing in with a second Google account and
+    // being shown a stranger's production. The panel asked for all projects
+    // and the rule said isSignedIn(), which every Google account satisfies.
+    //
+    // Refused outright rather than quietly returning the owned subset —
+    // a query that asks for more than it may have should fail, not be
+    // trimmed, or the next screen to forget the filter leaks again.
+    await assertFails(getDocs(collection(asProducer(main), "projects")));
+  });
+
+  it("refuses one producer another producer's project", async () => {
+    await assertFails(getDoc(doc(asProducer(main), "projects/projB")));
+  });
+
+  it("refuses the props, suppliers and quotes under it", async () => {
+    // The part that actually matters. A rival production's breakdown is its
+    // shopping list, its suppliers are its contacts, and its negotiations are
+    // what it is willing to pay.
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/items")),
+    );
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/suppliers")),
+    );
+    await assertFails(
+      getDocs(collection(asProducer(main), "projects/projB/negotiations")),
+    );
+  });
+
+  it("refuses another producer's correspondence", async () => {
+    await seed(main, "projects/projB/negotiations/neg2/messages/m1", {
+      direction: "inbound",
+      body: "We can do RM600.",
+    });
+
+    await assertFails(
+      getDocs(
+        collection(asProducer(main), "projects/projB/negotiations/neg2/messages"),
+      ),
+    );
   });
 
   it("lists one project's negotiations", async () => {
@@ -445,8 +504,69 @@ describe("what a browser may query", () => {
 
   it("still shuts an unauthenticated caller out of every one of those", async () => {
     await assertFails(getDocs(collection(asStranger(main), "projects")));
+    await assertFails(getDoc(doc(asStranger(main), "projects/projA")));
     await assertFails(
       getDocs(collection(asStranger(main), "projects/projA/negotiations")),
+    );
+  });
+});
+
+// --------------------------------------------------------------------------
+// mailboxes — whose Gmail the agent negotiates from
+// --------------------------------------------------------------------------
+
+describe("mailboxes", () => {
+  const mailbox = (email: string) => ({
+    email,
+    display_name: "A Producer",
+    status: "CONNECTED",
+    connected_at: new Date("2026-03-01T09:00:00Z"),
+    updated_at: new Date("2026-03-01T09:00:00Z"),
+  });
+
+  it("lets a producer read their own", async () => {
+    await seed(main, `mailboxes/${PRODUCER}`, mailbox("me@example.test"));
+
+    await assertSucceeds(
+      getDoc(doc(asProducer(main), `mailboxes/${PRODUCER}`)),
+    );
+  });
+
+  it("refuses to show one producer another's mailbox", async () => {
+    // Which address a rival production negotiates from is not a browser's
+    // business, and the document is keyed by uid precisely so the rule can
+    // say that in one line.
+    await seed(main, "mailboxes/someone-else", mailbox("them@example.test"));
+
+    await assertFails(
+      getDoc(doc(asProducer(main), "mailboxes/someone-else")),
+    );
+  });
+
+  it("refuses a browser writing its own mailbox, claim or no claim", async () => {
+    // The document records a consent that happened between a person and
+    // Google. A browser that could edit it could mark a dead mailbox healthy
+    // and strand every negotiation behind it — silently, which is the only
+    // way that failure ever shows up.
+    await assertFails(
+      setDoc(doc(asProducer(main), `mailboxes/${PRODUCER}`), mailbox("me@x.test")),
+    );
+  });
+
+  it("refuses an unauthenticated reader outright", async () => {
+    await seed(main, `mailboxes/${PRODUCER}`, mailbox("me@example.test"));
+
+    await assertFails(getDoc(doc(asStranger(main), `mailboxes/${PRODUCER}`)));
+  });
+
+  it("keeps the OAuth state binding away from browsers entirely", async () => {
+    // Reading one is enough to finish somebody else's consent and attach
+    // their mailbox to your own account.
+    await seed(main, "oauth_states/abc123", { uid: PRODUCER });
+
+    await assertFails(getDoc(doc(asProducer(main), "oauth_states/abc123")));
+    await assertFails(
+      setDoc(doc(asProducer(main), "oauth_states/mine"), { uid: PRODUCER }),
     );
   });
 });

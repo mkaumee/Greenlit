@@ -79,8 +79,11 @@ so a green laptop and a green CI mean the same thing.
 **Not started**
 
 `web/` has the read-only panel but none of Phase 6's screens · `supplier-sim/`,
-scaffolding only (later) · the live Gmail round-trip, which needs the OAuth
-bootstrap and two mailboxes.
+scaffolding only (later).
+
+**The live Gmail round-trip is proven.** Sent, delivered, replied, read back
+and threaded, against two real mailboxes — `make gmail-smoke REARM=1` then
+`POLL=1` re-runs it on demand without waiting for anybody to answer.
 
 **The deployed system is empty.** Everything runs; nothing has been uploaded.
 The next milestone is a screenplay in Firestore so the Scheduler has work —
@@ -103,9 +106,12 @@ Gmail cutover.
 - `/tick` is unauthenticated in code; the protection is deployment-side, and it
   is now real — an anonymous `POST /tick` against the live service returns 403,
   and only the Scheduler service account holds `run.invoker`.
-- The live email round-trip is unproven — it needs two mailboxes and the OAuth
-  bootstrap. The transport is covered offline; `docs/oauth-runbook.md` is the
-  checklist.
+- The live email round-trip is proven end to end against real Gmail. Two bugs
+  the fake could never have shown up came out of doing it: a poll that consumed
+  a hundred unrelated messages before deciding whose they were, and an unpaged
+  `messages.list` that would have dropped a supplier's reply out of view on any
+  busy inbox. Both are fixed and mutation-tested; `docs/oauth-runbook.md` has
+  the four read-only diagnostics that came out of chasing them.
 - **The consent screen stays in Testing, permanently.** Publishing looks like
   the fix for seven-day refresh tokens and is not available to us:
   `gmail.modify` is a restricted scope, so publishing forces Google's
@@ -150,7 +156,8 @@ strings, and only the header threads — so every reply would have forked a new
 thread in the supplier's inbox, invisibly, because our own routing uses Gmail's
 thread id and would have kept working.
 
-**Outstanding.** The live round-trip, which needs the mailboxes.
+**Outstanding.** Nothing. The live round-trip is proven, and the threading fix
+above is the reason it passed first time on the part that mattered.
 
 **Why here.** Nothing can run on a schedule until there is something to call,
 and no simulated day passes until real email moves.

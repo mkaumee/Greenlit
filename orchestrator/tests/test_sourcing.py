@@ -22,6 +22,7 @@ from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.app import Services, app
 from orchestrator.clock import FrozenRealTime, SimClock
 from orchestrator.mail import InMemoryMailbox
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import ItemStatus
 from orchestrator.repository import DueItem, FirestoreRepository
 from orchestrator.settings import Settings
@@ -56,7 +57,7 @@ async def api(firestore: AsyncClient) -> httpx.AsyncClient:
         clock=clock,
         brain=brain,
         mail=mail,
-        loop=TickLoop(repo, clock, brain, mail),
+        loop=TickLoop(repo, clock, brain, SingleMailbox(mail)),
     )
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -328,7 +329,7 @@ async def test_research_is_retried_rather_than_abandoned_when_it_finds_nobody(
         clock=clock,
         brain=brain,
         mail=InMemoryMailbox(),
-        loop=TickLoop(repo, clock, brain, InMemoryMailbox()),
+        loop=TickLoop(repo, clock, brain, SingleMailbox(InMemoryMailbox())),
     )
 
     await _new_project(api)
@@ -439,7 +440,7 @@ async def test_two_overlapping_ticks_research_an_item_once(
             repo := _RendezvousRepository(firestore, barrier),
             SimClock(repo, FrozenRealTime(REAL0)),
             brain,
-            InMemoryMailbox(),
+            SingleMailbox(InMemoryMailbox()),
         )
         for brain in brains
     ]
@@ -477,7 +478,7 @@ async def test_an_item_lost_to_contention_comes_back(
             repo := _RendezvousRepository(firestore, barrier),
             SimClock(repo, FrozenRealTime(REAL0)),
             ScriptedBrain(),
-            InMemoryMailbox(),
+            SingleMailbox(InMemoryMailbox()),
         )
         for _ in range(2)
     ]
@@ -487,7 +488,7 @@ async def test_an_item_lost_to_contention_comes_back(
     repo = FirestoreRepository(firestore)
     clock = SimClock(repo, FrozenRealTime(REAL0))
     _ = await clock.set_sim_now(PID, REAL0 + timedelta(hours=1))
-    settled = TickLoop(repo, clock, ScriptedBrain(), InMemoryMailbox())
+    settled = TickLoop(repo, clock, ScriptedBrain(), SingleMailbox(InMemoryMailbox()))
     for _ in range(3):
         _ = await settled.run_tick(PID)
 

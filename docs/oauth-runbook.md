@@ -60,15 +60,44 @@ different — no client JSON is in the image, so `CINEMA_OAUTH_CLIENT_ID` and
 make gmail-smoke TO=someone@gmail.com CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 # reply from that mailbox, then
 make gmail-smoke POLL=1 CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
+# to run that last step again without waiting for another reply
+make gmail-smoke REARM=1 CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=your-project-id
 ```
 
 `CINEMA_TOKEN_BACKEND` is only needed when the token went to Secret Manager,
 which is the normal case. Without it the script looks for a local file and
 says so, rather than claiming the bootstrap never ran.
 
-**Send to an address that is not the agent's own.** The poll query is
-`is:unread -from:me`, so mail the agent sent to itself is excluded — the reply
-would never appear, which looks like a broken transport and is not.
+**Send to an address that is not the agent's own.** Gmail keeps our outbound
+in the same thread and labels it `SENT`, which the transport skips — otherwise
+the agent would read its own message back as a supplier's answer and reply to
+itself. Mail the agent sent to itself therefore never appears, which looks like
+a broken transport and is not.
+
+### When the reply does not turn up
+
+`POLL=1` has exactly one negative answer, "nothing unread", and it covers
+several different situations. Four read-only modes tell them apart, and none of
+them consumes anything:
+
+| Mode | Answers |
+| --- | --- |
+| `INSPECT=1` | Every message in our thread, read or not. Is the reply there at all? |
+| `RECENT=1` | Unread mail anywhere, with thread ids. Oldest first — the newest is the **last** line. Did it land in a different conversation? |
+| `FIND=1` | Everything from the seller, **including spam and trash**, with full labels. Gmail hides those from every listing by default. |
+| `REARM=1` | Puts `UNREAD` back on our thread's replies so `POLL=1` can be run again. |
+
+`REARM` exists because the obvious instruction — "reply again, and don't open
+your inbox" — turns out to be one people cannot reliably follow, and opening a
+message in Gmail clears `UNREAD` before the poll ever sees it. Re-arming uses
+replies already received, so the last link can be proven without waiting on
+anybody. It touches only the thread this check started, never our own outbound,
+and the next poll clears the label again.
+
+The loop does **not** search the mailbox. It fetches the threads it started by
+id, because `messages.list` returns at most one page and a reply on a busy
+inbox would silently fall out of view. `poll_query` is only used by the by-hand
+inspection above.
 
 The transport has always been green against a fake. This is the first thing
 that hands a message to Google, and doing it in isolation means a wrong scope

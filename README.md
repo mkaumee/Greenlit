@@ -15,9 +15,8 @@ that limit is enforced by database rules rather than by prompt design.
 
 ```
 contracts/       The Role A / Role B interface. Both sides import it.
-main-agent/      Role A. The brain: four LLM-backed functions, no side effects.
+main-agent/      Role A. The brain: five LLM-backed functions, no side effects.
 orchestrator/    Role B. Clock, Firestore, Gmail, state machine, tick loop.
-supplier-sim/    Role B. Adversary simulator. Own mailbox, email only.
 web/             Role B. React + Vite + TypeScript, live on Firestore snapshots.
 scripts/         OAuth flow, seeding, the wall-clock guard.
 docs/            Runbooks.

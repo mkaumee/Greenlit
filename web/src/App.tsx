@@ -17,6 +17,7 @@ import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
 import type { User } from "@/firebase";
 import { useItems, useNegotiations, useProjects, useSuppliers } from "@/hooks/useProject";
 import { Breakdown } from "@/screens/Breakdown";
+import { Chat } from "@/screens/Chat";
 import { DebugPanel } from "@/screens/DebugPanel";
 import { Inbox } from "@/screens/Inbox";
 import { Savings } from "@/screens/Savings";
@@ -70,13 +71,20 @@ export function App() {
 }
 
 function SignedIn({ user }: { user: User }) {
-  const { ids } = useProjects();
+  const { ids, error: projectsError } = useProjects();
   const [chosen, setChosen] = useState("");
   const projectId = chosen !== "" && ids.includes(chosen) ? chosen : (ids[0] ?? "");
 
-  const { rows: items } = useItems(projectId);
-  const { rows: negotiations } = useNegotiations(projectId);
-  const { rows: suppliers } = useSuppliers(projectId);
+  const { rows: items, error: itemsError } = useItems(projectId);
+  const { rows: negotiations, error: negotiationsError } = useNegotiations(projectId);
+  const { rows: suppliers, error: suppliersError } = useSuppliers(projectId);
+
+  // These were read and discarded, so a rules refusal on any collection
+  // rendered as a production with nothing in it — the same silent failure the
+  // mailbox card had, one collection over. First one wins: they share a cause
+  // in practice, and four copies of the same message is not four problems.
+  const readError =
+    projectsError || itemsError || negotiationsError || suppliersError;
 
   const supplierName = (id: string | undefined): string =>
     suppliers.find((s) => s.id === id)?.name ?? id ?? "unknown seller";
@@ -85,6 +93,66 @@ function SignedIn({ user }: { user: User }) {
     negotiations.filter((n) => n.state === "READY_FOR_HUMAN").map((n) => n.item_id),
   ).size;
 
+  return (
+    <Routes>
+      {/* The chat is the whole window: three columns, its own scrolling, no
+          page chrome around it. The older tabbed screens keep their routes so
+          nothing that worked is lost while this settles, and they still carry
+          the header below. */}
+      <Route
+        path="/"
+        element={
+          <Chat
+            user={user}
+            projectId={projectId}
+            projectIds={ids}
+            onPickProject={setChosen}
+            items={items}
+            negotiations={negotiations}
+            suppliers={suppliers}
+            supplierName={supplierName}
+            readError={readError}
+          />
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <Panels
+            user={user}
+            ids={ids}
+            projectId={projectId}
+            setChosen={setChosen}
+            items={items}
+            negotiations={negotiations}
+            supplierName={supplierName}
+            waiting={waiting}
+          />
+        }
+      />
+    </Routes>
+  );
+}
+
+function Panels({
+  user,
+  ids,
+  projectId,
+  setChosen,
+  items,
+  negotiations,
+  supplierName,
+  waiting,
+}: {
+  user: User;
+  ids: string[];
+  projectId: string;
+  setChosen: (id: string) => void;
+  items: ReturnType<typeof useItems>["rows"];
+  negotiations: ReturnType<typeof useNegotiations>["rows"];
+  supplierName: (id: string | undefined) => string;
+  waiting: number;
+}) {
   return (
     <div className="mx-auto max-w-5xl px-6 py-8">
       <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
@@ -116,7 +184,8 @@ function SignedIn({ user }: { user: User }) {
       </header>
 
       <nav className="mb-8 flex gap-1 border-b">
-        <Tab to="/" label="Needs you" count={waiting} />
+        <Tab to="/" label="Chat" count={waiting} />
+        <Tab to="/inbox" label="Needs you" />
         <Tab to="/breakdown" label="Breakdown" />
         <Tab to="/savings" label="Savings" />
         <Tab to="/debug" label="Debug" />
@@ -124,7 +193,7 @@ function SignedIn({ user }: { user: User }) {
 
       <Routes>
         <Route
-          path="/"
+          path="/inbox"
           element={
             <Inbox
               projectId={projectId}

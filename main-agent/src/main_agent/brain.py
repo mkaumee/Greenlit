@@ -1,7 +1,7 @@
 """Public Role A implementation of the shared ``AgentBrain`` contract.
 
 ``GeminiAgentBrain`` is a facade, not a prompt monolith.  It is the one object
-Role B depends on, while four focused child modules own their ADK agent setup and
+Role B depends on, while five focused child modules own their ADK agent setup and
 domain-specific instructions.  This keeps the A/B boundary small and permits a
 capability to gain tools or stricter output handling without exposing ADK to the
 orchestrator.
@@ -16,12 +16,15 @@ from cinema_contracts import (
     ItemResearch,
     NegotiationContext,
     NextMove,
+    ProducerBriefing,
+    ProducerQuestion,
     PropDraft,
     QuoteExtraction,
     ScriptSource,
 )
 
 from main_agent.breakdown import BreakdownParser
+from main_agent.briefing import ProducerReporter
 from main_agent.negotiation import NegotiationDecider
 from main_agent.quote import QuoteExtractor
 from main_agent.research import ItemResearcher
@@ -46,6 +49,7 @@ class GeminiAgentBrain(AgentBrain):
         self._item_researcher = ItemResearcher(model=model)
         self._quote_extractor = QuoteExtractor(model=model)
         self._negotiation_decider = NegotiationDecider(model=model)
+        self._producer_reporter = ProducerReporter(model=model)
 
     @override
     async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
@@ -66,3 +70,8 @@ class GeminiAgentBrain(AgentBrain):
     async def next_move(self, ctx: NegotiationContext) -> NextMove:
         """Recommend the next negotiation action and any required email."""
         return await self._negotiation_decider.decide(ctx)
+
+    @override
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        """Answer a producer about their production, from the supplied digest."""
+        return await self._producer_reporter.brief(question)

@@ -206,5 +206,9 @@ class InMemoryMailbox:
         self._inbox.append(message)
         return message
 
+    def pending(self) -> list[RawInbound]:
+        """What is still unread, so a test can assert nothing was consumed."""
+        return list(self._inbox)
+
     def last_sent(self) -> dict[str, str] | None:
         return self.sent[-1] if self.sent else None

@@ -115,14 +115,28 @@ class Settings(BaseSettings):
     brain_backend: BrainBackend = BrainBackend.SCRIPTED
     """Which reasoning implementation to run.
 
-    Defaults to the fake because Role A's ``main-agent`` is not on this branch
-    yet. That default is a liability rather than a convenience: a fake that
-    ships looks exactly like a working system until someone reads a negotiation
-    email. ``/health`` reports which one is live for that reason.
+    ``main-agent`` is merged and the default is still the fake, deliberately —
+    the same posture as ``mail_backend``. That default is a liability rather
+    than a convenience: a fake that ships looks exactly like a working system
+    until someone reads a negotiation email. ``/health`` reports which one is
+    live, and with which model, for that reason.
     """
 
     gemini_model: str = "gemini-3.7-flash"
     """Which Gemini model Role A's brain reasons with.
+
+    Half of an answer on its own. The same name is served in some Vertex
+    locations and not others, so this travels with ``GOOGLE_CLOUD_LOCATION``
+    and only the pair means anything — a valid model sent to a location that
+    does not serve it returns the identical 404 to a name that does not exist.
+
+    That pair is what took this deployment down for a day: the model was fine
+    and ``scripts/deploy.sh`` was overriding the location with the Cloud Run
+    region. Every reasoning call 404'd, and nothing said so — the tick parked
+    its rows and the chat fell back to stored facts, both of which look like a
+    system that is merely quiet. The deploy now makes one real
+    ``generateContent`` call before it builds anything, so a bad pair is
+    refused at deploy time rather than found by reading prose a week later.
 
     Configuration rather than a literal, and passed explicitly rather than read
     from the environment inside main-agent — GeminiAgentBrain requires it as a
@@ -140,6 +154,21 @@ class Settings(BaseSettings):
 
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
+
+    oauth_redirect_uri: str = ""
+    """Where Google sends a producer back after they consent.
+
+    Must match a URI registered on the Web OAuth client **exactly** — Google
+    compares it as a string, and a mismatch is refused with
+    ``redirect_uri_mismatch``, which names nothing useful. Configuration rather
+    than a value derived at request time from the incoming Host header: the
+    header is attacker-controlled, and a redirect_uri built from it is a way to
+    have Google hand an authorization code to somewhere else.
+
+    Empty means the connect flow refuses to start, rather than building a URL
+    that Google will reject after the producer has already granted access.
+    ``scripts/oauth_redirect_uri.sh`` prints the value to register.
+    """
 
     # -- credentials ------------------------------------------------------- #
 
@@ -193,7 +222,13 @@ class Settings(BaseSettings):
     killed has done a predictable amount of work."""
 
     poll_query: str = "is:unread -from:me"
-    """Gmail search for the inbound poll. Excludes our own sent mail."""
+    """Gmail search for the by-hand inspection poll, and nothing else.
+
+    The loop does not search the mailbox: it fetches the threads it started, by
+    id. A search is capped at one page, so on a busy inbox a supplier's reply
+    can be paged out of view and never read — which is why no code path that
+    matters depends on this string.
+    """
 
     @property
     def refresh_token_path(self) -> Path:

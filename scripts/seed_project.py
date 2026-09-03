@@ -154,13 +154,16 @@ def preflight(client: httpx.Client, target: str, allow_live_mail: bool) -> int:
     return 0
 
 
-def seed(client: httpx.Client, target: str, pid: str, title: str) -> int:
+def seed(
+    client: httpx.Client, target: str, pid: str, title: str, owner_uid: str
+) -> int:
     created = client.post(
         f"{target}/projects",
         json={
             "project_id": pid,
             "title": title,
             "sim_start": SIM_START.isoformat(),
+            "owner_uid": owner_uid,
         },
     )
     if created.status_code != 201:
@@ -170,6 +173,12 @@ def seed(client: httpx.Client, target: str, pid: str, title: str) -> int:
         print("  screenplay onto it. Pick another: --project-name demo-2")
         return 1
     print(f"  created project {pid}")
+    if not owner_uid:
+        print("  ! no --owner-uid, so no browser will be able to see it.")
+        print("    firestore.rules matches projects on owner_uid, so an")
+        print("    unowned project is unreachable rather than public — which")
+        print("    is the safe default and probably not what you wanted here.")
+        print("    Your uid is on the Users tab of Firebase Authentication.")
 
     read = client.post(
         f"{target}/projects/{pid}/script", json={"text_content": SCREENPLAY}
@@ -214,6 +223,11 @@ def main() -> int:
         "--project-name", default="demo", help="id of the project to create"
     )
     _ = parser.add_argument("--title", default="Nasi Lemak Nights")
+    _ = parser.add_argument(
+        "--owner-uid",
+        default="",
+        help="Firebase uid of the producer who will see this in the panel",
+    )
     _ = parser.add_argument(
         "--target", default="", help="tick service URL; discovered if absent"
     )
@@ -260,7 +274,13 @@ def main() -> int:
         if failed:
             return failed
         print()
-        if seed(client, target, str(args.project_name), str(args.title)):
+        if seed(
+            client,
+            target,
+            str(args.project_name),
+            str(args.title),
+            str(args.owner_uid),
+        ):
             return 1
 
     print()

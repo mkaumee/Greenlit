@@ -4,7 +4,7 @@
 # it the moment role_a lands; until then the directory is absent and uv simply
 # has nothing to build for it, while CINEMA_BRAIN_BACKEND stays on the fake.
 [tool.uv.workspace]
-members = ["contracts", "orchestrator", "supplier-sim", "main-agent"]
+members = ["contracts", "orchestrator", "main-agent"]
 
 [tool.uv.sources]
 cinema-contracts = { workspace = true }
@@ -83,7 +83,7 @@ line-ending = "lf"
 [tool.basedpyright]
 typeCheckingMode = "recommended"
 pythonVersion = "3.14"
-include = ["contracts", "orchestrator", "supplier-sim", "scripts", "main-agent"]
+include = ["contracts", "orchestrator", "scripts", "main-agent"]
 exclude = ["**/node_modules", "**/.venv", "**/__pycache__"]
 # scripts/ holds standalone tools that CI runs without installing anything.
 # Putting it on the path lets tests import them with real types instead of
@@ -96,7 +96,7 @@ reportImplicitStringConcatenation = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["contracts/tests", "orchestrator/tests", "supplier-sim/tests"]
+testpaths = ["contracts/tests", "orchestrator/tests", "main-agent/tests"]
 pythonpath = ["scripts", "orchestrator/tests"]
 # orchestrator/tests is on the path so a test can import the emulator helpers
 # from conftest by name rather than relying on pytest's rootdir insertion,

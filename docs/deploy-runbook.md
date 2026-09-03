@@ -294,3 +294,56 @@ thing to look at the morning after — `messages_sent`, `claims_lost`,
 | `/healthz` returns an HTML 404 while everything else works | Not our bug to fix — Google's front end swallows that path on Cloud Run. The health endpoint is `/health` for exactly this reason; do not rename it back. Proven on the deployed service: `/openapi.json` returned 200 listing `/healthz` as a registered route, an unknown path returned our own JSON 404, and `/healthz` alone returned Google's HTML. |
 | Verifier says the tick account can read `orders` | The service accounts are the wrong way round. This is the one that silently undoes Phase 4 — fix before anything else. |
 | Verifier reports a Firestore denial mentioning `Invalid choice` | Not a denial — a gcloud subcommand that does not exist, exiting non-zero. The guardrail check is testing nothing. Fixed once already (`gcloud firestore documents list` was invented); if it recurs, confirm the command exists before trusting the result. |
+
+## Turning the real brain on
+
+Gemini authenticates through **Vertex AI with the service account**, not an API
+key. We are already on Google Cloud and the account already exists, so there is
+nothing to store, rotate or leak — `deploy.sh` enables `aiplatform.googleapis.com`,
+grants `roles/aiplatform.user`, and sets the three names google-genai reads:
+`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`.
+
+### The OAuth client
+
+`deploy.sh` reads the client id and secret out of the JSON you downloaded from
+the Cloud Console — `.secrets/client_secret.json` by default, or point
+`OAUTH_CLIENT_SECRETS` at it. Both shapes work: `web` for a Web application
+client, which is what the connect flow needs, and `installed` for a Desktop
+one.
+
+**A project usually has several Web clients.** Firebase creates one for Google
+sign-in when you enable it, and there is the one you made by hand for this
+flow. They look interchangeable in the console and are not: picking the wrong
+one fails as `redirect_uri_mismatch`, after a producer has already been
+through the consent screen.
+
+The right one is whichever has the `/mailbox/callback` URI in its **Authorised
+redirect URIs**. `deploy.sh` checks the JSON you gave it against the URI it
+just configured and says whether they match — so after you register the URI,
+re-download that client's JSON and the next deploy will confirm you are using
+the same client. Leave Firebase's own client alone.
+
+Setting `CINEMA_OAUTH_CLIENT_ID` and `CINEMA_OAUTH_CLIENT_SECRET` explicitly
+still wins, for a machine that has no client file. Otherwise leave them alone —
+copying two strings out of a file we already know how to find is a place to
+paste the wrong thing, and a client secret truncated by a stray newline fails
+as `invalid_client`, which names nothing useful.
+
+The one credential that is still a key is research. Role A's researcher
+searches the web through Parallel:
+
+```bash
+PARALLEL_API_KEY=... BRAIN_BACKEND=main-agent \
+  PROJECT_ID=your-project-id ./scripts/deploy.sh
+```
+
+Without it the search call raises, the researcher catches it, and the model is
+told "web search failed" — so it answers anyway, from memory, and its price
+bands and supplier URLs are invented rather than sourced. Nothing errors and
+nothing logs. The deploy refuses that combination, the service refuses to start
+on it, and `/health` reports `research_key_present` so a service that lost the
+check is visible from outside.
+
+**Do not turn the brain and real mail on in the same deploy.** If the first
+live email to a seller reads badly, you want to know whether it was the
+reasoning or the transport.

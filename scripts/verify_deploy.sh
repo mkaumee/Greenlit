@@ -43,9 +43,11 @@ PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
 AGENT_SA="${AGENT_SA:-cinema-agent}"
 APPROVALS_SA="${APPROVALS_SA:-cinema-approvals}"
+API_SA="${API_SA:-cinema-api}"
 ORDERS_DB="${ORDERS_DB:-orders}"
 TICK_SERVICE="${TICK_SERVICE:-cinema-tick}"
 APPROVALS_SERVICE="${APPROVALS_SERVICE:-cinema-approvals}"
+API_SERVICE="${API_SERVICE:-cinema-api}"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "PROJECT_ID is not set." >&2
@@ -56,6 +58,7 @@ command -v gcloud >/dev/null || { echo "gcloud is not installed." >&2; exit 2; }
 
 AGENT_EMAIL="${AGENT_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 APPROVALS_EMAIL="${APPROVALS_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+API_EMAIL="${API_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 PASSED=0
 FAILED=0
@@ -77,12 +80,20 @@ TICK_URL=$(gcloud run services describe "$TICK_SERVICE" --region="$REGION" \
   --format='value(status.url)' 2>/dev/null || true)
 APPROVALS_URL=$(gcloud run services describe "$APPROVALS_SERVICE" \
   --region="$REGION" --format='value(status.url)' 2>/dev/null || true)
+API_URL=$(gcloud run services describe "$API_SERVICE" \
+  --region="$REGION" --format='value(status.url)' 2>/dev/null || true)
 
 if [[ -n "$TICK_URL" ]]; then pass "tick: $TICK_URL"
 else fail "tick service not found"; fi
 
 if [[ -n "$APPROVALS_URL" ]]; then pass "approvals: $APPROVALS_URL"
 else fail "approvals service not found"; fi
+
+# API_SERVICE was declared at the top of this script and used nowhere. The one
+# service a producer's browser actually talks to — chat, script upload, mailbox
+# connect — was absent from the verification entirely.
+if [[ -n "$API_URL" ]]; then pass "api: $API_URL"
+else fail "api service not found"; fi
 
 # ---------------------------------------------------------------------------
 say "2. The tick is private, and answers an authorised caller"
@@ -94,6 +105,25 @@ say "2. The tick is private, and answers an authorised caller"
 # requested URL was not found on this server") and a 404 from FastAPI
 # ({"detail":"Not Found"}) mean completely different things — wrong hostname
 # versus wrong route — and the status code alone cannot tell them apart.
+
+body_of() {
+  # The whole response body, or empty. `http` truncates to 160 bytes for its
+  # one-line reports, which is right there and useless for JSON.
+  curl -sS --max-time 20 "$@" 2>/dev/null || true
+}
+
+# One field out of a /health body. python3 rather than jq, which Cloud Shell
+# does not guarantee, and rather than grep, which is how the last reading of a
+# deployed value came back cut in half.
+field() {
+  python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except Exception:
+    print("")
+' "$1" 2>/dev/null
+}
 
 http() {
   # Prints "CODE<TAB>first 160 bytes of body, newlines squashed".
@@ -183,6 +213,18 @@ if [[ -n "$APPROVALS_URL" ]]; then
     -H 'Content-Type: application/json' \
     -d '{"project_id":"none","negotiation_id":"none"}' \
     "$APPROVALS_URL/items/none/approve"
+fi
+
+if [[ -n "$API_URL" ]]; then
+  # Public on purpose, same as approvals: Cloud Run IAM cannot validate a
+  # Firebase ID token, so auth.py is the gate. What must be true is that an
+  # anonymous question about somebody's production is refused.
+  check_http "api /health" 200 "$API_URL/health"
+
+  check_http "an unauthenticated chat is refused" 401 -XPOST \
+    -H 'Content-Type: application/json' \
+    -d '{"project_id":"none","question":"what needs me?"}' \
+    "$API_URL/chat"
 fi
 
 # ---------------------------------------------------------------------------
@@ -285,6 +327,21 @@ case $? in
       note "unconditioned roles/datastore.user on $AGENT_SA."
     else
       pass "the tick account cannot touch '$ORDERS_DB' — Hard Rule 5 holds"
+    fi
+
+    # The api service serves the producer's browser and is the newest way this
+    # could quietly stop being true: one wrong role on it and the identity
+    # behind every chat message and script upload can write purchase orders.
+    if gcloud iam service-accounts describe "$API_EMAIL" >/dev/null 2>&1; then
+      if try_read "$API_EMAIL" "$ORDERS_DB"; then
+        fail "the api account CAN read the '$ORDERS_DB' database"
+        note "That account serves the browser. It must not reach money."
+        note "Look for an unconditioned roles/datastore.user on $API_SA."
+      else
+        pass "the api account cannot touch '$ORDERS_DB' either"
+      fi
+    else
+      huh "no $API_SA account yet — run scripts/deploy.sh"
     fi
     ;;
   1)
@@ -464,6 +521,97 @@ else
   esac
 fi
 rm -f "$auth_errfile"
+
+# ---------------------------------------------------------------------------
+say "7. What is actually reasoning"
+# ---------------------------------------------------------------------------
+#
+# Every question in this section used to be answered by composing a gcloud
+# expression on the spot, and one of those came back cut in half because the
+# env is a list of dicts and it was split on commas. The services already
+# report all of it on /health; this reads the body instead of the status code.
+#
+# Nothing here can FAIL. A scripted brain and an off mailbox are legitimate
+# configurations — they are the defaults — and the point is that neither is
+# visible from any screen in the product. Reporting them is the whole job.
+
+if [[ -n "$TICK_URL" ]]; then
+  token=$(gcloud auth print-identity-token 2>/dev/null || true)
+  tick_health=$(body_of -H "Authorization: Bearer $token" "$TICK_URL/health")
+
+  brain=$(field brain_backend <<<"$tick_health")
+  case "$brain" in
+    main-agent)
+      pass "tick brain: main-agent ($(field gemini_model <<<"$tick_health") via $(field gemini_credentials <<<"$tick_health"))"
+      ;;
+    scripted)
+      huh "tick brain: SCRIPTED — a regex and a word list write the emails"
+      note "every negotiation message is template text; it looks fine until read"
+      ;;
+    *) huh "tick brain: could not read /health" ;;
+  esac
+
+  mail=$(field mail_backend <<<"$tick_health")
+  case "$mail" in
+    gmail)  pass "mail: gmail — this deployment sends real email" ;;
+    memory) huh "mail: memory — nothing is sent to anyone" ;;
+    *)      huh "mail: could not read /health" ;;
+  esac
+
+  case "$(field research_key_present <<<"$tick_health")" in
+    True|true) pass "research key: configured" ;;
+    *)         huh "research key: absent — price bands would be unsourced" ;;
+  esac
+fi
+
+if [[ -n "$API_URL" ]]; then
+  api_health=$(body_of "$API_URL/health")
+  api_brain=$(field brain_backend <<<"$api_health")
+  case "$api_brain" in
+    main-agent)
+      pass "api brain: main-agent ($(field gemini_model <<<"$api_health") via $(field gemini_credentials <<<"$api_health"))"
+      ;;
+    scripted)
+      huh "api brain: SCRIPTED — the chat cannot reason and PDFs are refused"
+      ;;
+    *) huh "api brain: could not read /health" ;;
+  esac
+
+  # The two services reason independently and are configured separately. One
+  # on the real brain and one on the fake is a deployment where the chat is
+  # thoughtful and the negotiations are templates, or the reverse.
+  if [[ -n "$brain" && -n "$api_brain" && "$brain" != "$api_brain" ]]; then
+    huh "tick and api disagree about the brain ($brain vs $api_brain)"
+  fi
+fi
+
+# The research key itself: never printed, because a terminal may be on a
+# screen share and a key belongs in Secret Manager. Length and last four are
+# enough to tell a real one from the word somebody pasted, which is the only
+# question anyone actually has about it.
+research_key=$(gcloud run services describe "$TICK_SERVICE" --region="$REGION" \
+  --format=json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    spec = json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0]
+except Exception:
+    sys.exit(0)
+for entry in spec.get("env", []):
+    if entry.get("name") == "PARALLEL_API_KEY":
+        print(entry.get("value", ""))
+        break
+' 2>/dev/null || true)
+
+placeholders="your-key your-api-key your_key api-key changeme xxx todo"
+if [[ -z "$research_key" ]]; then
+  note "research key: not set on $TICK_SERVICE"
+elif [[ " $placeholders " == *" ${research_key,,} "* ]]; then
+  fail "research key is the placeholder '$research_key', not a key"
+  note "search fails on every call; the model then answers from memory, and"
+  note "its price bands and supplier URLs are invented rather than sourced"
+else
+  note "research key: ${#research_key} chars, ending ...${research_key: -4}"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n\033[1m%s\033[0m\n' "Result"

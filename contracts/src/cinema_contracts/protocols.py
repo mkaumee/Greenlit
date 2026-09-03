@@ -1,4 +1,4 @@
-"""The four signatures. This is the whole Role A / Role B interface.
+"""The five signatures. This is the whole Role A / Role B interface.
 
 Role A implements ``AgentBrain``. Role B imports the protocol, never the
 implementation, and passes a fake in tests. That is what lets both halves be
@@ -10,20 +10,22 @@ Firestore, does not touch Gmail, does not know what time it is, and keeps no
 memory between calls. If a decision needs a fact, that fact belongs in
 ``NegotiationContext`` and adding it is a two-person change.
 
-All four methods are ``async`` because all four make network-bound LLM calls.
+All five methods are ``async`` because all five make network-bound LLM calls.
 """
 
 from typing import Protocol, runtime_checkable
 
 from cinema_contracts.models import (
-    BreakdownSource,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    ProducerBriefing,
+    ProducerQuestion,
+    PropDraft,
     QuoteExtraction,
+    ScriptSource,
 )
 
 
@@ -35,7 +37,7 @@ class AgentBrain(Protocol):
     same input, same kind of output, no writes anywhere.
     """
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
         """Read a screenplay and list every physical thing a scene needs.
 
         This is the job a human does with a highlighter before a shoot. The
@@ -56,10 +58,15 @@ class AgentBrain(Protocol):
         mention. "He remembered his father's watch" needs no watch. "The room
         smelled of rain" needs no rain.
 
-        Return an empty list if the document contains no recognisable props. Do
-        not pad it out with plausible-sounding set dressing — a short honest
-        list is recoverable, an invented one sends the agent off negotiating for
-        things the production does not need.
+        "Needs to exist" is wider than what an actor picks up. A production has
+        to source the chairs as well as the cup: furniture, décor, signage and
+        the clothes the script puts a character in are all things somebody has
+        to buy, and ``category`` is where they are told apart.
+
+        Return an empty list if the document contains no recognisable items. Do
+        not pad it out with plausible-sounding things the script never names —
+        a short honest list is recoverable, an invented one sends the agent off
+        negotiating for things the production does not need.
         """
         ...
 
@@ -110,5 +117,35 @@ class AgentBrain(Protocol):
         Return ``WAIT`` when the right answer is to do nothing yet; the tick
         loop will come back. Returning ``WAIT`` forever is caught by
         ``max_rounds`` and escalated by Role B.
+        """
+        ...
+
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        """Answer a producer asking about their own production.
+
+        The only method here that talks to a person rather than about one, and
+        the only one whose output is read rather than acted on. That makes it
+        the safest of the five and the easiest to be quietly wrong in: a
+        confident sentence about a supplier who does not exist reads exactly
+        like a confident sentence about one who does.
+
+        So: **answer only from what is in the question.** Every item and every
+        negotiation the producer may be told about is in there, and Role B
+        checks each id that comes back against the ones it sent. An id that was
+        not in the question is dropped rather than rendered, which is a link
+        that silently disappears — better than a link to nothing, and worse
+        than not inventing it.
+
+        Say you do not know. "No supplier has quoted for the mirror yet" is a
+        good answer. Estimating what one might quote is not, because a producer
+        reading it has no way to tell the two apart.
+
+        This is the place for judgement the deterministic path cannot offer —
+        whether a price is worth pushing on, whether a supplier's silence is
+        worth chasing, what to do first. Counting things is not judgement:
+        Role B already has the numbers and does not need them re-derived.
+
+        ``ProducerBriefing`` carries prose and ids. Nothing on it causes a
+        write, so this cannot spend money however wrong it is.
         """
         ...

@@ -37,12 +37,16 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY contracts/pyproject.toml contracts/
 COPY orchestrator/pyproject.toml orchestrator/
-COPY supplier-sim/pyproject.toml supplier-sim/
+COPY main-agent/pyproject.toml main-agent/
 RUN uv sync --frozen --no-dev --no-install-workspace --package orchestrator
 
 # Then the code, and install the workspace members themselves.
 COPY contracts/ contracts/
 COPY orchestrator/ orchestrator/
+# Role A's brain. Needed in the image because CINEMA_BRAIN_BACKEND=main-agent
+# resolves it by name at startup, and a service deployed without it fails its
+# health check rather than falling back to the fake.
+COPY main-agent/ main-agent/
 RUN uv sync --frozen --no-dev --package orchestrator
 
 # --------------------------------------------------------------------------- #

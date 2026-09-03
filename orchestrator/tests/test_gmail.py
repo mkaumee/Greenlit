@@ -4,6 +4,9 @@
 # same call signature the real client is invoked with, or the tests would not
 # be exercising the calls we actually make.
 # pyright: reportExplicitAny=false, reportAny=false, reportUnusedParameter=false
+# googleapiclient ships no stubs, and HttpError is imported here to build the
+# 404 a deleted thread raises. Same suppression gmail.py carries.
+# pyright: reportMissingTypeStubs=false
 """Gmail transport tests, against a faked API resource.
 
 No network and no credentials, so these run anywhere — which matters because
@@ -19,14 +22,19 @@ from email.message import Message
 from pathlib import Path
 from typing import Any, final
 
+import httplib2
 import pytest
+from googleapiclient.errors import HttpError
 from orchestrator.gmail import (
     FileTokenStore,
     GmailTransport,
     SecretManagerTokenStore,
+    Sender,
     client_credentials,
+    producer_token_store,
     token_store_for,
 )
+from orchestrator.mail import InMemoryMailbox, MailTransport
 from orchestrator.settings import Settings, TokenBackend
 
 SETTINGS = Settings(
@@ -39,6 +47,11 @@ SETTINGS = Settings(
 # --------------------------------------------------------------------------- #
 # A stand-in for googleapiclient's resource object
 # --------------------------------------------------------------------------- #
+
+
+def _not_found() -> HttpError:
+    """What googleapiclient raises for a thread that is gone."""
+    return HttpError(resp=httplib2.Response({"status": 404}), content=b"not found")
 
 
 @final
@@ -69,9 +82,30 @@ class _Messages:
             }
         )
 
-    def list(self, *, userId: str, q: str) -> _Executable:  # noqa: N803
+    def list(
+        self,
+        *,
+        userId: str,  # noqa: N803
+        q: str,
+        maxResults: int = 100,  # noqa: N803
+        includeSpamTrash: bool = False,  # noqa: N803
+    ) -> _Executable:
+        """Newest first, as Gmail returns them, and spam-blind by default.
+
+        Both of those are Gmail's real behaviour and both have bitten us: the
+        ordering because a reversed conversation reads as the wrong person
+        speaking last, and the default because a filtered reply sits somewhere
+        no listing we ran could see.
+        """
         self._fake.queries.append(q)
-        return _Executable({"messages": [{"id": m["id"]} for m in self._fake.inbox]})
+        self._fake.spam_trash_included.append(includeSpamTrash)
+        visible = [
+            m
+            for m in self._fake.inbox
+            if includeSpamTrash or not {"SPAM", "TRASH"} & set(m.get("labelIds") or [])
+        ]
+        page = list(reversed(visible))[:maxResults]
+        return _Executable({"messages": [{"id": m["id"]} for m in page]})
 
     def get(self, *, userId: str, id: str, format: str) -> _Executable:  # noqa: A002, N803
         for message in self._fake.inbox:
@@ -81,18 +115,59 @@ class _Messages:
 
     def modify(self, *, userId: str, id: str, body: dict[str, Any]) -> _Executable:  # noqa: A002, N803
         self._fake.modified.append((id, body))
+        # Labels are the real state the transport reads back on the next call,
+        # so the fake has to actually apply them — otherwise re-arming a
+        # message and then polling for it would pass without the label
+        # changing at all.
+        for message in self._fake.inbox:
+            if message["id"] != id:
+                continue
+            labels = set(message.get("labelIds") or [])
+            labels |= set(body.get("addLabelIds") or [])
+            labels -= set(body.get("removeLabelIds") or [])
+            message["labelIds"] = sorted(labels)
         return _Executable({})
+
+
+@final
+class _Threads:
+    """Gmail's threads resource, which is what the loop actually reads.
+
+    The mailbox is never listed for the loop's benefit: threads are fetched by
+    id, so a busy inbox cannot page a supplier's reply out of view.
+    """
+
+    _fake: FakeGmail
+
+    def __init__(self, fake: FakeGmail) -> None:
+        self._fake = fake
+
+    def get(self, *, userId: str, id: str, format: str) -> _Executable:  # noqa: A002, N803
+        messages = [m for m in self._fake.inbox if m.get("threadId") == id]
+        if not messages:
+            raise _not_found()
+        return _Executable({"id": id, "messages": messages})
 
 
 @final
 class _Users:
     _messages: _Messages
+    _threads: _Threads
+    _fake: FakeGmail
 
     def __init__(self, fake: FakeGmail) -> None:
         self._messages = _Messages(fake)
+        self._threads = _Threads(fake)
+        self._fake = fake
+
+    def getProfile(self, *, userId: str) -> _Executable:  # noqa: N802, N803
+        return _Executable({"emailAddress": self._fake.profile_email})
 
     def messages(self) -> _Messages:
         return self._messages
+
+    def threads(self) -> _Threads:
+        return self._threads
 
 
 @final
@@ -103,6 +178,8 @@ class FakeGmail:
     inbox: list[dict[str, Any]]
     modified: list[tuple[str, dict[str, Any]]]
     queries: list[str]
+    spam_trash_included: list[bool]
+    profile_email: str
     _users: _Users
 
     def __init__(self) -> None:
@@ -110,6 +187,8 @@ class FakeGmail:
         self.inbox = []
         self.modified = []
         self.queries = []
+        self.spam_trash_included = []
+        self.profile_email = "connected@example.test"
         self._users = _Users(self)
 
     def users(self) -> _Users:
@@ -131,6 +210,7 @@ def _inbound(
     thread_id: str = "t-1",
     headers: list[dict[str, str]] | None = None,
     payload: dict[str, Any] | None = None,
+    labels: list[str] | None = None,
 ) -> dict[str, Any]:
     base_headers = headers or [
         {"name": "From", "value": "seller@example.test"},
@@ -140,6 +220,7 @@ def _inbound(
     return {
         "id": message_id,
         "threadId": thread_id,
+        "labelIds": ["INBOX", "UNREAD"] if labels is None else labels,
         "payload": payload
         or {
             "mimeType": "text/plain",
@@ -271,12 +352,17 @@ async def test_poll_excludes_our_own_sent_mail() -> None:
 
 
 async def test_poll_returns_oldest_first() -> None:
-    """Gmail lists newest first; filing them that way inverts the timeline."""
+    """Gmail lists newest first; filing them that way inverts the timeline.
+
+    ``inbox`` is in the order the mailbox received them and the fake hands them
+    back newest first, exactly as Gmail does. Un-reversing that is the
+    transport's job — drop it and this comes out backwards.
+    """
     transport, fake = _transport()
     fake.inbox.extend(
         [
-            _inbound(message_id="newer"),
             _inbound(message_id="older"),
+            _inbound(message_id="newer"),
         ]
     )
 
@@ -534,3 +620,439 @@ async def test_polling_without_saying_what_you_own_changes_nothing() -> None:
 
     assert [m.message_id for m in got] == ["whatever"]
     assert fake.modified == [], "nothing may be marked read"
+
+
+# --------------------------------------------------------------------------- #
+# Why the mailbox is never listed
+# --------------------------------------------------------------------------- #
+#
+# messages.list returns at most a hundred per page, and was called unpaged. A
+# supplier's reply on a busy mailbox fell off page one and was never read: the
+# negotiation ran out its rounds and closed as though nobody had answered.
+# Silence is what a supplier going quiet looks like, so nothing looked wrong.
+
+
+async def test_a_reply_is_found_under_a_hundred_newer_unread_messages() -> None:
+    """The regression that started this. Ours is last; it is still returned."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id=f"noise-{n}", thread_id=f"t-noise-{n}") for n in range(100)
+    ]
+    fake.inbox.append(_inbound(message_id="reply", thread_id="t-negotiation"))
+
+    got = await transport.poll(threads=frozenset({"t-negotiation"}))
+
+    assert [m.message_id for m in got] == ["reply"]
+    assert fake.queries == [], "the loop must not list the mailbox at all"
+
+
+async def test_our_own_sent_mail_in_the_thread_is_not_read_back_as_a_reply() -> None:
+    """Gmail keeps our outbound in the same thread. Filing it would have the
+    agent answering itself."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours-out", thread_id="t-1", labels=["SENT", "UNREAD"]),
+        _inbound(message_id="theirs", thread_id="t-1"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert [m.message_id for m in got] == ["theirs"]
+    assert [message_id for message_id, _ in fake.modified] == ["theirs"]
+
+
+async def test_a_message_already_filed_is_not_returned_a_second_time() -> None:
+    """UNREAD is the only record of what a previous tick consumed."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="filed", thread_id="t-1", labels=["INBOX"]),
+        _inbound(message_id="fresh", thread_id="t-1"),
+    ]
+
+    got = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert [m.message_id for m in got] == ["fresh"]
+
+
+async def test_a_thread_that_no_longer_exists_does_not_stop_the_tick() -> None:
+    """One deleted conversation must not strand every other negotiation."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="alive", thread_id="t-alive")]
+
+    got = await transport.poll(threads=frozenset({"t-alive", "t-deleted"}))
+
+    assert [m.message_id for m in got] == ["alive"]
+
+
+# --------------------------------------------------------------------------- #
+# Looking without consuming
+# --------------------------------------------------------------------------- #
+#
+# poll() answers "what is new", and its only negative answer is "nothing" —
+# which covers both a reply that never arrived and a reply somebody opened in
+# Gmail before the poll ran. Opening a message clears UNREAD, so a person
+# checking their own mailbox destroys the evidence poll works from. Inspection
+# separates the two, and must never itself consume anything.
+
+
+async def test_inspection_shows_read_and_unread_alike() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="old", thread_id="t-1", labels=["INBOX"]),
+        _inbound(message_id="new", thread_id="t-1"),
+    ]
+
+    seen = await transport.inspect_thread("t-1")
+
+    assert [m.inbound.message_id for m in seen] == ["old", "new"]
+    assert [m.is_unread for m in seen] == [False, True]
+
+
+async def test_inspection_marks_nothing_read() -> None:
+    """The whole point: asking the question must not change the answer."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="reply", thread_id="t-1")]
+
+    _ = await transport.inspect_thread("t-1")
+
+    assert fake.modified == []
+
+
+async def test_inspection_says_which_messages_are_ours() -> None:
+    """Otherwise the sent copy reads as a reply and the check passes falsely."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-1", labels=["SENT"]),
+        _inbound(message_id="theirs", thread_id="t-1"),
+    ]
+
+    seen = await transport.inspect_thread("t-1")
+
+    assert [m.is_ours for m in seen] == [True, False]
+
+
+async def test_inspecting_a_thread_that_is_gone_is_an_answer_not_an_error() -> None:
+    transport, _ = _transport()
+
+    assert await transport.inspect_thread("t-never-existed") == []
+
+
+async def test_the_read_only_sample_is_bounded() -> None:
+    """It exists for a person at a terminal, not for the loop.
+
+    Unbounded, it would page a busy mailbox into the console and cost a
+    request per message — and the sample is only ever a hint about where a
+    reply landed, so completeness is not what it is for.
+    """
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id=f"m-{n}", thread_id=f"t-{n}") for n in range(200)]
+
+    sampled = await transport.poll()
+
+    assert len(sampled) == 25
+    assert fake.modified == [], "a sample must never consume"
+
+
+# --------------------------------------------------------------------------- #
+# The blind spot
+# --------------------------------------------------------------------------- #
+#
+# Gmail's messages.list defaults includeSpamTrash to false. Every listing this
+# system has run has therefore been unable to see a filtered reply — and a
+# supplier whose answer lands in spam is, from the panel, identical to one who
+# never answered. Diagnostics have to be able to look there. Nothing in the
+# loop passes it, because the loop does not list the mailbox at all.
+
+
+async def test_a_filtered_reply_is_invisible_unless_asked_for() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="clean", thread_id="t-1"),
+        _inbound(message_id="filtered", thread_id="t-2", labels=["SPAM", "UNREAD"]),
+    ]
+
+    default = await transport.search("is:unread")
+    widened = await transport.search("is:unread", include_spam_trash=True)
+
+    assert [m.inbound.message_id for m in default] == ["clean"]
+    assert [m.inbound.message_id for m in widened] == ["clean", "filtered"]
+
+
+async def test_search_reports_the_labels_so_spam_can_be_named() -> None:
+    """ "It arrived" and "it arrived in spam" are different answers."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="filtered", labels=["SPAM", "UNREAD"])]
+
+    found = await transport.search("x", include_spam_trash=True)
+
+    assert "SPAM" in found[0].labels
+
+
+async def test_search_consumes_nothing_however_it_is_called() -> None:
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="a", thread_id="t-1"),
+        _inbound(message_id="b", thread_id="t-2", labels=["SPAM", "UNREAD"]),
+    ]
+
+    _ = await transport.search("x")
+    _ = await transport.search("x", include_spam_trash=True)
+
+    assert fake.modified == []
+
+
+async def test_search_is_capped() -> None:
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id=f"m-{n}", thread_id=f"t-{n}") for n in range(60)]
+
+    assert len(await transport.search("x", limit=5)) == 5
+
+
+async def test_the_loop_never_widens_the_search_to_spam() -> None:
+    """The sample is a debugging affordance. Spam is opt-in, per call."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound()]
+
+    _ = await transport.poll()
+
+    assert fake.spam_trash_included == [False]
+
+
+# --------------------------------------------------------------------------- #
+# Re-arming
+# --------------------------------------------------------------------------- #
+#
+# The live check had no way to reset itself. Proving poll returns a reply needs
+# an unread reply, and once one has been read the only route back was asking a
+# person to send another and then not look at their own inbox. That failed
+# three times in a row, which says more about the instruction than the person.
+
+
+async def test_rearming_makes_a_read_reply_pollable_again() -> None:
+    """Both halves in one test, because that is the whole claim."""
+    transport, fake = _transport()
+    fake.inbox = [_inbound(message_id="reply", thread_id="t-1", labels=["INBOX"])]
+
+    rearmed = await transport.restore_unread("t-1")
+    received = await transport.poll(threads=frozenset({"t-1"}))
+
+    assert rearmed == ["reply"]
+    assert [m.message_id for m in received] == ["reply"]
+
+
+async def test_our_own_sent_mail_is_not_rearmed() -> None:
+    """Poll skips it anyway, so this would be noise in somebody's inbox."""
+    transport, fake = _transport()
+    fake.inbox = [
+        _inbound(message_id="ours", thread_id="t-1", labels=["SENT"]),
+        _inbound(message_id="theirs", thread_id="t-1", labels=["INBOX"]),
+    ]
+
+    assert await transport.restore_unread("t-1") == ["theirs"]
+
+
+async def test_rearming_a_thread_that_is_gone_is_not_an_error() -> None:
+    transport, _ = _transport()
+
+    assert await transport.restore_unread("t-never-existed") == []
+
+
+def test_the_loop_cannot_rearm_anything() -> None:
+    """``restore_unread`` is a write, and the tick loop has no business with it.
+
+    Same shape of guard as the one asserting the tick app exposes no /approve
+    route: the boundary is worth asserting rather than remembering. A method
+    absent from the protocol cannot be called through it, whichever transport
+    is wired in.
+    """
+    assert not hasattr(MailTransport, "restore_unread")
+    assert not hasattr(InMemoryMailbox, "restore_unread")
+
+
+# --------------------------------------------------------------------------- #
+# Whose address this is
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_from_line_is_the_senders_not_the_settings() -> None:
+    """A producer's own Gmail, once they connect one.
+
+    Gmail rewrites a From header that does not match the authenticated
+    account, so a transport built with the wrong identity does not fail — it
+    silently sends as somebody else, and the panel then tells the producer
+    they are negotiating from an address they are not.
+    """
+    fake = FakeGmail()
+    transport = GmailTransport(
+        fake, SETTINGS, Sender(email="hana@example.test", display_name="Hana")
+    )
+
+    _ = await transport.send(to="seller@example.test", subject="Hi", body="Hello")
+
+    mime = _sent_mime(fake)
+    assert mime["From"] == "Hana <hana@example.test>"
+    assert "example.test" in str(mime["Message-ID"])
+
+
+async def test_without_a_sender_it_falls_back_to_the_configured_identity() -> None:
+    """What the single shared mailbox used, and what the smoke check runs on."""
+    transport, fake = _transport()
+
+    _ = await transport.send(to="seller@example.test", subject="Hi", body="Hello")
+
+    assert _sent_mime(fake)["From"] == "Greenlit <agent@cinema.test>"
+
+
+async def test_the_connected_address_is_asked_for_not_assumed() -> None:
+    transport, fake = _transport()
+    fake.profile_email = "someone-else@gmail.test"
+
+    assert await transport.connected_address() == "someone-else@gmail.test"
+
+
+def test_each_producer_gets_their_own_secret() -> None:
+    """One secret per producer, never one shared secret holding a map.
+
+    A map needs one binding instead of many, which is tempting — but Secret
+    Manager has no compare-and-swap, so two producers connecting at the same
+    moment would read the same version and one would overwrite the other's
+    token. That loss is silent, and shows up days later as negotiations that
+    never moved.
+    """
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        token_backend=TokenBackend.SECRET_MANAGER,
+        gcp_project="proj",
+    )
+
+    one = producer_token_store(settings, "uid-one")
+    two = producer_token_store(settings, "uid-two")
+
+    assert isinstance(one, SecretManagerTokenStore)
+    assert isinstance(two, SecretManagerTokenStore)
+    assert one._secret != two._secret  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_producer_token_falls_back_to_a_file_off_cloud(tmp_path: Path) -> None:
+    """So the flow can be exercised on a laptop with no GCP project."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        token_backend=TokenBackend.FILE,
+        token_dir=tmp_path,
+    )
+
+    store = producer_token_store(settings, "uid-one")
+
+    assert isinstance(store, FileTokenStore)
+    store.write("refresh-me")
+    assert store.read() == "refresh-me"
+    assert not (tmp_path / "gmail_refresh_token.json").exists(), (
+        "must not collide with the single shared agent token"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Writing a producer's token into Secret Manager
+# --------------------------------------------------------------------------- #
+#
+# This class had no behavioural test at all — only assertions about which store
+# gets picked and what its secret is called. The gap cost a live deploy: a
+# producer completed Google's consent screen and got a 500 back, because
+# `add_secret_version` was called on a container nobody had created. The
+# consent grant is spent by then, so the failure lands after the producer has
+# done everything right.
+
+
+@final
+class FakeSecretClient:
+    """Secret Manager as far as this class uses it.
+
+    Containers and versions are separate, exactly as the real service has them,
+    because collapsing the two is the mistake being tested for.
+    """
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self.secrets: set[str] = set(existing or ())
+        self.versions: list[tuple[str, bytes]] = []
+        self.created: list[str] = []
+
+    def add_secret_version(self, *, request: dict[str, Any]) -> object:
+        from google.api_core import exceptions
+
+        parent = str(request["parent"])
+        if parent.rsplit("/", 1)[-1] not in self.secrets:
+            raise exceptions.NotFound(f"Secret [{parent}] not found.")
+        self.versions.append((parent, bytes(request["payload"]["data"])))
+        return object()
+
+    def create_secret(self, *, request: dict[str, Any]) -> object:
+        from google.api_core import exceptions
+
+        secret_id = str(request["secret_id"])
+        if secret_id in self.secrets:
+            raise exceptions.AlreadyExists(f"Secret [{secret_id}] already exists.")
+        self.secrets.add(secret_id)
+        self.created.append(secret_id)
+        return object()
+
+
+def _use(monkeypatch: pytest.MonkeyPatch, client: FakeSecretClient) -> None:
+    """Swap the client out on the module the store imports inside its methods.
+
+    That late import is what makes this patchable at all — the real client
+    wants credentials at construction, so a module-level one would need a GCP
+    project just to import the file.
+    """
+    from google.cloud import secretmanager
+
+    def build_client(*_args: object, **_kwargs: object) -> FakeSecretClient:
+        return client
+
+    monkeypatch.setattr(secretmanager, "SecretManagerServiceClient", build_client)
+
+
+def test_a_first_time_producer_gets_their_secret_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, exactly. Nobody creates `<secret>-<uid>` before the producer
+    who owns it connects, so the first write has to."""
+    client = FakeSecretClient()
+    _use(monkeypatch, client)
+
+    SecretManagerTokenStore("proj", "token-uid-1").write("refresh-me")
+
+    assert client.created == ["token-uid-1"]
+    assert client.versions == [("projects/proj/secrets/token-uid-1", b"refresh-me")]
+
+
+def test_reconnecting_does_not_recreate_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common case — the seven-day expiry means this runs weekly — and it
+    must cost one call, not a create attempt every time."""
+    client = FakeSecretClient(existing={"token-uid-1"})
+    _use(monkeypatch, client)
+
+    SecretManagerTokenStore("proj", "token-uid-1").write("second-token")
+
+    assert client.created == []
+    assert client.versions[-1][1] == b"second-token"
+
+
+def test_two_producers_connecting_at_once_both_store_a_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Add-then-create still races: both can miss, both can create, and one
+    loses. Losing means that producer's token is never stored and their
+    negotiations never send — silently, which is why the loser carries on to
+    add its version rather than propagating AlreadyExists."""
+    client = FakeSecretClient()
+    _use(monkeypatch, client)
+    store = SecretManagerTokenStore("proj", "token-shared")
+
+    store.write("first")
+    # The second caller's create loses to the first, which is what a real
+    # concurrent create returns.
+    store.write("second")
+
+    assert [payload for _, payload in client.versions] == [b"first", b"second"]

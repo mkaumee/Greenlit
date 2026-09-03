@@ -15,7 +15,7 @@ Everything is a plain read-compute-write. Nothing is cached between calls, so
 any handler using this repository is safe to kill mid-run — Hard Rule 3.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cinema_contracts import TERMINAL_STATES, Money
@@ -28,6 +28,8 @@ from orchestrator.records import (
     ITEM_TERMINAL_STATUSES,
     ItemRecord,
     ItemStatus,
+    MailboxRecord,
+    MailboxStatus,
     MessageRecord,
     NegotiationRecord,
     ProjectRecord,
@@ -44,6 +46,8 @@ SUPPLIERS = "suppliers"
 NEGOTIATIONS = "negotiations"
 MESSAGES = "messages"
 PURCHASE_ORDERS = "purchase_orders"
+MAILBOXES = "mailboxes"
+OAUTH_STATES = "oauth_states"
 
 
 class DuplicateOrderError(RuntimeError):
@@ -220,6 +224,89 @@ class FirestoreRepository:
         snapshot = await self._project_ref(project_id).get()
         data = snapshot.to_dict()
         return None if data is None else ProjectRecord.model_validate(data)
+
+    # ------------------------------------------------------------------ #
+    # Mailboxes
+    # ------------------------------------------------------------------ #
+    #
+    # Metadata only. The refresh token is in Secret Manager — see
+    # MailboxRecord for why a credential does not go in here.
+
+    async def get_mailbox(self, uid: str) -> MailboxRecord | None:
+        snapshot = await self._db.collection(MAILBOXES).document(uid).get()
+        data = snapshot.to_dict()
+        return None if data is None else MailboxRecord.model_validate(data)
+
+    async def save_mailbox(self, uid: str, rec: MailboxRecord) -> None:
+        _ = await self._db.collection(MAILBOXES).document(uid).set(rec.to_firestore())
+
+    async def mark_mailbox(
+        self, uid: str, status: MailboxStatus, now: datetime
+    ) -> None:
+        """Record that a mailbox stopped working, without touching the rest.
+
+        Called from the tick when a refresh is refused. A merge rather than a
+        write of the whole record, because the tick is not the authority on
+        which address is connected — only on whether it still works.
+        """
+        _ = await (
+            self._db.collection(MAILBOXES)
+            .document(uid)
+            .set({"status": status.value, "updated_at": now}, merge=True)
+        )
+
+    # ------------------------------------------------------------------ #
+    # OAuth state
+    # ------------------------------------------------------------------ #
+    #
+    # The only thing binding an authorization code to a producer. The callback
+    # arrives as a redirect from Google with no Authorization header, so there
+    # is nothing else to check: whoever presents a live state value is treated
+    # as the producer who started that consent.
+
+    async def create_oauth_state(self, state: str, uid: str, now: datetime) -> None:
+        """Record who began a consent. ``create``, so a value cannot be reused
+        even by whoever minted it."""
+        _ = (
+            await self._db.collection(OAUTH_STATES)
+            .document(state)
+            .create({"uid": uid, "created_at": now})
+        )
+
+    async def claim_oauth_state(
+        self, state: str, now: datetime, ttl: timedelta
+    ) -> str | None:
+        """Spend a state value, returning whose it was, or ``None``.
+
+        Deleted before the caller does anything with it, and the delete is
+        conditioned on the document's ``update_time``. Two callbacks racing the
+        same state — a double-clicked popup, or a replay — both read it and
+        both try; the storage engine admits exactly one. Filtering after the
+        read would let both through, which is the same class of bug the tick's
+        row claiming exists to stop.
+
+        Expiry, an unknown value and one already spent are deliberately not
+        distinguished: the caller has no legitimate use for the difference and
+        an attacker probing for a live value does.
+        """
+        ref = self._db.collection(OAUTH_STATES).document(state)
+        snapshot = await ref.get()
+        data = snapshot.to_dict()
+        if data is None:
+            return None
+
+        try:
+            _ = await ref.delete(
+                option=self._db.write_option(last_update_time=snapshot.update_time)
+            )
+        except FailedPrecondition:
+            # Somebody else spent it between our read and our delete.
+            return None
+
+        created = data.get("created_at")
+        if not isinstance(created, datetime) or now - created > ttl:
+            return None
+        return str(data.get("uid") or "") or None
 
     # ------------------------------------------------------------------ #
     # Items and suppliers
@@ -411,8 +498,8 @@ class FirestoreRepository:
             )
         return due
 
-    async def live_thread_ids(self) -> frozenset[str]:
-        """Every Gmail thread this system is currently negotiating in.
+    async def live_thread_ids(self, project_id: str) -> frozenset[str]:
+        """Every Gmail thread this project is currently negotiating in.
 
         The transport is given this so it only ever reads — and only ever marks
         read — mail in conversations we started. Without it, polling an inbox
@@ -420,12 +507,20 @@ class FirestoreRepository:
         irreversible and, on a mailbox that is also somebody's personal one,
         destroys a hundred messages' worth of unread state.
 
-        A collection-group query, like ``due_negotiations``: threads belong to
-        the system rather than to any one project, because an inbound message
-        arrives knowing nothing about which project it concerns.
+        Scoped to one project, not to the whole system. It was a
+        collection-group query while every project shared one mailbox, and that
+        was right then. Now that a producer connects their own, the set has to
+        match the mailbox being polled: handing project A's tick the thread ids
+        of project B would have A's mailbox consume B's replies whenever the
+        same person owns both — filed correctly, by the wrong project's tick,
+        which is the kind of wrong that never shows up as a bug and quietly
+        makes the ownership rule untrue.
         """
-        query = self._db.collection_group(NEGOTIATIONS).where(
-            filter=FieldFilter("gmail_thread_id", "!=", "")
+        query = (
+            self._db.collection(PROJECTS)
+            .document(project_id)
+            .collection(NEGOTIATIONS)
+            .where(filter=FieldFilter("gmail_thread_id", "!=", ""))
         )
         found: set[str] = set()
         async for snapshot in query.stream():
@@ -437,27 +532,33 @@ class FirestoreRepository:
                 found.add(thread)
         return frozenset(found)
 
-    async def find_by_thread(self, thread_id: str) -> DueNegotiation | None:
+    async def find_by_thread(
+        self, project_id: str, thread_id: str
+    ) -> DueNegotiation | None:
         """Locate a negotiation from an inbound Gmail thread ID.
 
         Inbound mail is routed by thread ID and never by subject line, because
         suppliers rewrite subjects and a subject match would file a reply
         against the wrong negotiation.
+
+        Scoped to the project whose mailbox the message was read from, for the
+        same reason ``live_thread_ids`` is.
         """
         if not thread_id:
             return None
         query = (
-            self._db.collection_group(NEGOTIATIONS)
+            self._db.collection(PROJECTS)
+            .document(project_id)
+            .collection(NEGOTIATIONS)
             .where(filter=FieldFilter("gmail_thread_id", "==", thread_id))
             .limit(1)
         )
         async for snapshot in query.stream():
             data = snapshot.to_dict()
-            project_ref = snapshot.reference.parent.parent
-            if data is None or project_ref is None:
+            if data is None:
                 continue
             return DueNegotiation(
-                project_id=project_ref.id,
+                project_id=project_id,
                 negotiation_id=snapshot.id,
                 record=NegotiationRecord.model_validate(data),
                 update_time=snapshot.update_time,

@@ -18,17 +18,19 @@ from decimal import Decimal
 
 from cinema_contracts.enums import EscalationReason, MessageDirection, MoveAction
 from cinema_contracts.models import (
-    BreakdownSource,
     ExtractedQuote,
     InboundMessage,
     ItemBrief,
-    ItemDraft,
     ItemResearch,
     NegotiationContext,
     NextMove,
+    ProducerBriefing,
+    ProducerQuestion,
+    PropDraft,
     QuoteExtraction,
     ReferenceBand,
     SceneMention,
+    ScriptSource,
     SupplierCandidate,
 )
 from cinema_contracts.money import Money
@@ -108,7 +110,7 @@ class ScriptedBrain:
     def __init__(self, *, anchor: Money | None = None) -> None:
         self._anchor = anchor or Money(amount=1000)
 
-    async def parse_breakdown(self, source: BreakdownSource) -> list[ItemDraft]:
+    async def extract_props(self, source: ScriptSource) -> list[PropDraft]:
         """Spot known nouns in action lines and quote the line they came from.
 
         A keyword scan against a fixed vocabulary — nothing like what the real
@@ -117,6 +119,20 @@ class ScriptedBrain:
         line it was found in, and a prop hit by a destructive verb comes back
         ``consumable``.
         """
+        if source.content_b64:
+            # A keyword scan cannot read a PDF, and returning [] would be the
+            # exact failure this whole path guards against: a producer would
+            # see "no props found" and conclude their screenplay needed
+            # nothing bought. Refusing names the reason instead.
+            raise ValueError(
+                f"{source.filename or 'That file'} is a document, and this "
+                "deployment is running the scripted brain "
+                "(CINEMA_BRAIN_BACKEND=scripted), which only reads plain "
+                "text. Paste the text, upload a .txt or .fdx, or switch to "
+                "CINEMA_BRAIN_BACKEND=main-agent, which reads the file "
+                "itself."
+            )
+
         found: dict[str, list[SceneMention]] = {}
         destroyed: set[str] = set()
         scene = "1"
@@ -144,7 +160,7 @@ class ScriptedBrain:
                         destroyed.add(word)
 
         return [
-            ItemDraft(
+            PropDraft(
                 name=word,
                 category="prop",
                 qty=1,
@@ -298,4 +314,36 @@ class ScriptedBrain:
             target_price=target,
             suggest_next_check_in_sim_hours=24.0,
             confidence=0.6,
+        )
+
+    async def brief_producer(self, question: ProducerQuestion) -> ProducerBriefing:
+        """A count, and nothing that sounds like judgement.
+
+        Deliberately flat. The fake exists so the pipeline has something honest
+        to run on offline, and a stand-in that produced plausible advice would
+        be worse than useless here: the whole point of the real method is
+        judgement, and a fake one is indistinguishable from a real one until
+        somebody acts on it.
+
+        Every id it cites comes from the question, so the caller's reference
+        check has something true to pass on.
+        """
+        waiting = [n for n in question.negotiations if n.waiting_on_human]
+        headline = (
+            f"{question.title}: {len(question.items)} prop(s), "
+            f"{len(question.negotiations)} negotiation(s), "
+            f"{len(waiting)} waiting on you."
+        )
+        lines = [headline]
+        lines.extend(
+            f"  · {n.item_name} — {n.supplier} at {n.latest_quote or 'no price yet'}"
+            for n in waiting
+        )
+        lines.append("(Scripted brain: this is a count, not advice.)")
+
+        return ProducerBriefing(
+            text="\n".join(lines),
+            referenced_item_ids=[i.item_id for i in question.items],
+            referenced_negotiation_ids=[n.negotiation_id for n in waiting],
+            confidence=0.3,
         )

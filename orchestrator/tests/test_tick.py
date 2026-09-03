@@ -14,7 +14,7 @@ The two that matter most:
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import override
+from typing import final, override
 
 import pytest
 from cinema_contracts import (
@@ -26,11 +26,14 @@ from cinema_contracts import (
     NextMove,
 )
 from cinema_contracts.testing import ScriptedBrain
+from google.auth.exceptions import RefreshError
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.clock import ClockState, FrozenRealTime, SimClock
-from orchestrator.mail import InMemoryMailbox
+from orchestrator.mail import InMemoryMailbox, MailTransport, RawInbound
+from orchestrator.mailboxes import SingleMailbox
 from orchestrator.records import (
     ItemRecord,
+    ItemStatus,
     NegotiationRecord,
     ProjectRecord,
     SupplierRecord,
@@ -57,7 +60,9 @@ class _Harness:
         self.repo = FirestoreRepository(client)
         self.clock = SimClock(self.repo, FrozenRealTime(REAL0))
         self.mail = InMemoryMailbox()
-        self.loop = TickLoop(self.repo, self.clock, brain or ScriptedBrain(), self.mail)
+        self.loop = TickLoop(
+            self.repo, self.clock, brain or ScriptedBrain(), SingleMailbox(self.mail)
+        )
 
     async def setup_project(self) -> None:
         await self.repo.create_project(
@@ -91,6 +96,7 @@ class _Harness:
         state: NegotiationState = NegotiationState.DRAFTED,
         due: datetime | None = None,
         floor: Money | None = None,
+        thread_id: str = "",
     ) -> None:
         await self.repo.save_negotiation(
             PID,
@@ -100,6 +106,7 @@ class _Harness:
                 supplier_id="sup1",
                 state=state,
                 floor_price=floor,
+                gmail_thread_id=thread_id,
                 next_action_due_at=due if due is not None else T0,
                 created_at=T0,
                 updated_at=T0,
@@ -575,11 +582,58 @@ async def test_a_terminal_negotiation_is_never_examined_again(
     assert report.messages_sent == 0
 
 
-async def test_mail_for_an_unknown_thread_is_counted_not_crashed(
+async def test_mail_for_an_unknown_thread_is_never_even_fetched(
     harness: _Harness,
 ) -> None:
+    """The loop tells the transport which threads are its own.
+
+    This used to be filed and counted after the fact, which meant the mailbox
+    had already been read — and, on the real transport, already marked read.
+    The guard belongs one layer down: mail outside our conversations is not
+    fetched, so there is nothing to count and nothing was consumed.
+    """
     await harness.add_negotiation()
-    _ = harness.mail.deliver(thread_id="thread-we-never-started", body="RM500")
+    foreign = harness.mail.deliver(thread_id="thread-we-never-started", body="RM500")
+
+    report = await harness.loop.run_tick(PID)
+
+    assert report.unmatched_replies == 0
+    assert not report.errors
+    assert harness.mail.pending() == [foreign], "it must still be sitting unread"
+
+
+class _ForgetfulRepository(FirestoreRepository):
+    """Names a thread as live, then cannot find it a moment later.
+
+    The race the transport cannot close: ``live_thread_ids`` reads the project's
+    whole set at the top of a tick, and a negotiation can be removed between
+    then and ``find_by_thread``. Rare, and the only way the unmatched branch is
+    now reachable at all — which is exactly why it needs holding down.
+    """
+
+    @override
+    async def find_by_thread(
+        self, project_id: str, thread_id: str
+    ) -> DueNegotiation | None:
+        return None
+
+
+async def test_a_reply_whose_negotiation_vanished_is_counted_not_crashed(
+    firestore: AsyncClient,
+) -> None:
+    harness = _Harness(firestore)
+    harness.repo = _ForgetfulRepository(firestore)
+    harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
+    harness.loop = TickLoop(
+        harness.repo, harness.clock, ScriptedBrain(), SingleMailbox(harness.mail)
+    )
+    await harness.setup_project()
+    await harness.add_negotiation(
+        state=NegotiationState.AWAITING_REPLY,
+        due=T0 + timedelta(days=2),
+        thread_id="thread-1",
+    )
+    _ = harness.mail.deliver(thread_id="thread-1", body="RM500")
 
     report = await harness.loop.run_tick(PID)
 
@@ -638,7 +692,9 @@ def _racing_loop(client: AsyncClient, barrier: asyncio.Barrier) -> _Harness:
     harness = _Harness(client)
     harness.repo = _RendezvousRepository(client, barrier)
     harness.clock = SimClock(harness.repo, FrozenRealTime(REAL0))
-    harness.loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), harness.mail)
+    harness.loop = TickLoop(
+        harness.repo, harness.clock, ScriptedBrain(), SingleMailbox(harness.mail)
+    )
     return harness
 
 
@@ -692,3 +748,175 @@ async def test_the_loser_leaves_the_negotiation_alone(
     assert record.state is NegotiationState.AWAITING_REPLY
     assert record.last_outbound_at == T0
     assert record.gmail_thread_id, "the winner's thread id survived"
+
+
+# --------------------------------------------------------------------------- #
+# A project with no mailbox
+# --------------------------------------------------------------------------- #
+#
+# Producers connect their own Gmail, so a project can exist before there is
+# anywhere to send from — and a refresh token issued by a consent screen in
+# Testing dies after seven days, which is shorter than a negotiation. Neither
+# case may look like "nothing was due".
+
+
+@final
+class _NoMailbox:
+    """A producer who has not connected, or whose token has expired."""
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return None
+
+
+def _unmailed(harness: _Harness) -> TickLoop:
+    return TickLoop(harness.repo, harness.clock, ScriptedBrain(), _NoMailbox())
+
+
+async def test_a_project_with_no_mailbox_says_so(harness: _Harness) -> None:
+    await harness.add_negotiation()
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.mailbox_missing
+    assert not report.errors, "a missing mailbox is a state, not a failure"
+
+
+async def test_no_mailbox_leaves_the_negotiation_where_it_was(
+    harness: _Harness,
+) -> None:
+    """Not claimed, not decided, not half-advanced.
+
+    Every move that matters ends in a message. Claiming a row and asking the
+    brain for a counter-offer we then cannot deliver would burn a negotiation
+    round on a supplier who never heard from us, and park the row for the lease
+    on the way through.
+    """
+    await harness.add_negotiation()
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.negotiations_examined == 0
+    assert report.messages_sent == 0
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert record.state is NegotiationState.DRAFTED
+    assert record.next_action_due_at == T0, "still due, untouched"
+
+
+async def test_research_still_happens_without_a_mailbox(harness: _Harness) -> None:
+    """Costs nothing and is worth having done by the time one is connected."""
+    await harness.repo.save_item(
+        PID,
+        "item2",
+        ItemRecord(
+            name="Mirror",
+            category="set dressing",
+            status=ItemStatus.RESEARCHING,
+            next_action_due_at=T0,
+        ),
+    )
+
+    report = await _unmailed(harness).run_tick(PID)
+
+    assert report.items_researched == 1
+
+
+# --------------------------------------------------------------------------- #
+# A mailbox that stopped working
+# --------------------------------------------------------------------------- #
+#
+# Building a transport does not contact Google — the refresh token is only
+# exchanged when it is used — so an expired credential reaches the poll looking
+# healthy. This is the first moment it is discoverable, and if the tick does
+# not record it here the project simply stops moving, indistinguishable from
+# suppliers who have all gone quiet at once.
+
+
+@final
+class _RefusingMailbox:
+    """A producer whose refresh token Google will not honour any more."""
+
+    marked: list[tuple[str, datetime]]
+
+    def __init__(self) -> None:
+        self.marked = []
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return _RefusingTransport()
+
+    async def mark_expired(self, project_id: str, now: datetime) -> None:
+        self.marked.append((project_id, now))
+
+
+@final
+class _RefusingTransport(InMemoryMailbox):
+    @override
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        _ = threads
+        raise RefreshError("invalid_grant")
+
+
+@final
+class _BrokenMailbox:
+    """A transport that fails for some reason that is not expiry."""
+
+    async def for_project(self, project_id: str) -> MailTransport | None:
+        _ = project_id
+        return _TimingOutTransport()
+
+
+@final
+class _TimingOutTransport(InMemoryMailbox):
+    @override
+    async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
+        _ = threads
+        raise TimeoutError("the network went away")
+
+
+async def test_a_refused_token_is_recorded_against_the_producer(
+    harness: _Harness,
+) -> None:
+    await harness.add_negotiation()
+    mailboxes = _RefusingMailbox()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), mailboxes)
+
+    report = await loop.run_tick(PID)
+
+    assert report.mailbox_missing
+    assert [p for p, _ in mailboxes.marked] == [PID]
+    assert not report.errors, "an expired token is a state, not a failure"
+
+
+async def test_a_refused_token_leaves_the_negotiation_alone(
+    harness: _Harness,
+) -> None:
+    """Nothing can be sent, so nothing should be decided.
+
+    Claiming the row and asking the brain for a counter-offer we cannot deliver
+    would burn a round on a supplier who never heard from us.
+    """
+    await harness.add_negotiation()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), _RefusingMailbox())
+
+    report = await loop.run_tick(PID)
+
+    assert report.negotiations_examined == 0
+    assert report.messages_sent == 0
+
+
+async def test_a_network_failure_is_not_blamed_on_the_producer(
+    harness: _Harness,
+) -> None:
+    """The distinction the whole thing turns on.
+
+    A blip is retried next tick and needs nobody told. Marking it as an expired
+    mailbox would send a producer through a consent screen to fix a problem
+    that had already fixed itself.
+    """
+    await harness.add_negotiation()
+    loop = TickLoop(harness.repo, harness.clock, ScriptedBrain(), _BrokenMailbox())
+
+    with pytest.raises(TimeoutError):
+        _ = await loop.run_tick(PID)

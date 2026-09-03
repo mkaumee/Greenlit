@@ -21,9 +21,10 @@ endif
 # Cloud resource names, shared by the deploy targets so they cannot drift.
 REGION ?= us-central1
 APPROVALS_SERVICE ?= cinema-approvals
+API_SERVICE ?= cinema-api
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
-.PHONY: gcp-setup deploy-rules deploy verify-deploy require-firebase require-gcloud require-project
+.PHONY: gcp-setup deploy-rules deploy verify-deploy redirect-uri check-research require-firebase require-gcloud require-project
 .PHONY: web-dev web-build deploy-web seed gmail-smoke
 
 help:
@@ -122,6 +123,19 @@ deploy: require-gcloud require-project ## Deploy both Cloud Run services and the
 verify-deploy: require-gcloud require-project ## Check a deployment — read-only, and the real definition of done
 	PROJECT_ID=$(PROJECT_ID) ./scripts/verify_deploy.sh
 
+# The direct answer to "is web search actually working", which was otherwise a
+# choice between a full deploy and reading price bands for signs of invention.
+# Tests the key the DEPLOYED tick holds, not the one in your shell — this
+# project ran for days on the literal word `your-key` while every local check
+# passed.
+check-research: require-gcloud require-project ## Make one real Parallel search and report
+	uv run python scripts/check_research.py --from-deployment --project-id $(PROJECT_ID)
+
+# Needed before any producer can connect a mailbox, and needed again whenever
+# somebody asks "what was that URL". Read-only, so it costs nothing to re-run.
+redirect-uri: require-gcloud require-project ## Print the OAuth redirect URI to register, and where
+	PROJECT_ID=$(PROJECT_ID) ./scripts/oauth_redirect_uri.sh
+
 # Keyed on the lockfile, not on any binary.
 #
 # An earlier version depended on web/node_modules/.bin/vite, which fixed the
@@ -155,13 +169,17 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 	@url=$$(gcloud run services describe $(APPROVALS_SERVICE) \
 	          --region=$(REGION) --project=$(PROJECT_ID) \
 	          --format='value(status.url)' 2>/dev/null); \
-	  if [ -z "$$url" ]; then \
-	    echo "could not find the $(APPROVALS_SERVICE) service in $(PROJECT_ID)."; \
-	    echo "  deploy it first:  make deploy PROJECT_ID=$(PROJECT_ID)"; \
+	  api=$$(gcloud run services describe $(API_SERVICE) \
+	          --region=$(REGION) --project=$(PROJECT_ID) \
+	          --format='value(status.url)' 2>/dev/null); \
+	  if [ -z "$$url" ] || [ -z "$$api" ]; then \
+	    echo "could not find $(APPROVALS_SERVICE) and $(API_SERVICE) in $(PROJECT_ID)."; \
+	    echo "  deploy them first:  make deploy PROJECT_ID=$(PROJECT_ID)"; \
 	    exit 2; \
 	  fi; \
 	  echo "  approvals: $$url"; \
-	  cd web && VITE_APPROVALS_URL="$$url" npm run build
+	  echo "  api:       $$api"; \
+	  cd web && VITE_APPROVALS_URL="$$url" VITE_API_URL="$$api" npm run build
 	firebase deploy --only hosting --project $(PROJECT_ID)
 
 # Puts a screenplay into a DEPLOYED project, so the hosted panel has something
@@ -173,11 +191,38 @@ deploy-web: require-firebase require-gcloud require-project web/node_modules/.pa
 #
 #   make gmail-smoke TO=seller@example.com   # send one
 #   make gmail-smoke POLL=1                  # read the reply
+#   make gmail-smoke INSPECT=1               # show the thread, change nothing
+#   make gmail-smoke RECENT=1                # unread anywhere, with thread ids
+#   make gmail-smoke FIND=1                  # all mail from the seller, spam too
+#   make gmail-smoke REARM=1                 # make our thread's replies unread
+#
+# INSPECT exists because POLL can only say "nothing unread", which is the same
+# answer for a reply that never arrived and a reply that was opened in Gmail
+# before the poll saw it — opening a message clears UNREAD. RECENT answers the
+# one INSPECT cannot: a reply that is not in our thread is somewhere, and where
+# tells you whether Gmail is slow or whether it started its own conversation —
+# the second being the failure the loop can never recover from. FIND goes one
+# further and looks in SPAM and TRASH, which Gmail hides from every listing by
+# default — so a filtered reply is somewhere nothing else here can see. REARM
+# resets the check against replies we already have, rather than depending on
+# somebody sending another one and then not opening their own inbox.
 #
 # Add CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=... when the token
 # was bootstrapped into Secret Manager rather than a local file.
 gmail-smoke: ## Send one real email and read the reply (needs a bootstrapped token)
-	@if [ -n "$(POLL)" ]; then \
+	@if [ -n "$(REARM)" ]; then \
+	  uv run python scripts/gmail_smoke.py --rearm; \
+	elif [ -n "$(FIND)" ]; then \
+	  if [ "$(FIND)" = "1" ]; then \
+	    uv run python scripts/gmail_smoke.py --find; \
+	  else \
+	    uv run python scripts/gmail_smoke.py --find "$(FIND)"; \
+	  fi; \
+	elif [ -n "$(RECENT)" ]; then \
+	  uv run python scripts/gmail_smoke.py --recent; \
+	elif [ -n "$(INSPECT)" ]; then \
+	  uv run python scripts/gmail_smoke.py --inspect; \
+	elif [ -n "$(POLL)" ]; then \
 	  uv run python scripts/gmail_smoke.py --poll; \
 	else \
 	  [ -n "$(TO)" ] || { echo "make gmail-smoke TO=seller@example.com"; exit 2; }; \

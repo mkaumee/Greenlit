@@ -33,6 +33,8 @@ the tick stamps it with ``clock.now()`` — see Hard Rule 2 in CLAUDE.md.
 import asyncio
 import base64
 import json
+from contextlib import suppress
+from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
@@ -40,6 +42,7 @@ from typing import Any, Protocol
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from orchestrator.mail import RawInbound, SentMessage
 from orchestrator.settings import GMAIL_SCOPES, Settings, TokenBackend
@@ -109,13 +112,51 @@ class SecretManagerTokenStore:
         return response.payload.data.decode("utf-8")
 
     def write(self, refresh_token: str) -> None:
+        """Add a version, creating the secret the first time.
+
+        Secret Manager separates the container from its contents, and
+        ``add_secret_version`` on a container that does not exist is a plain
+        ``NotFound``. That was fine while there was one bootstrapped secret and
+        a human had made it by hand; it stopped being fine the moment every
+        producer got their own, because the first thing a new producer does is
+        write to a name nobody has created. It surfaced as a 500 on the OAuth
+        callback *after* Google had already granted consent — the worst place
+        for it, since the producer has done everything right and the grant is
+        spent.
+
+        Add-then-create rather than get-then-add: reconnecting is the common
+        case and costs one call, and the check-then-act version has a race
+        that this does not. Two producers connecting at the same instant both
+        create; one gets ``AlreadyExists`` and carries on to add its version.
+        """
+        from google.api_core import exceptions
         from google.cloud import secretmanager
 
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{self._project}/secrets/{self._secret}"
-        _ = client.add_secret_version(
-            request={"parent": parent, "payload": {"data": refresh_token.encode()}}
-        )
+        payload = {"data": refresh_token.encode()}
+
+        try:
+            _ = client.add_secret_version(
+                request={"parent": parent, "payload": payload}
+            )
+            return
+        except exceptions.NotFound:
+            pass
+
+        with suppress(exceptions.AlreadyExists):
+            _ = client.create_secret(
+                request={
+                    "parent": f"projects/{self._project}",
+                    "secret_id": self._secret,
+                    # Automatic replication: this is a credential, not data with
+                    # a residency requirement, and pinning regions here would be
+                    # a decision nothing else in the deploy makes.
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+
+        _ = client.add_secret_version(request={"parent": parent, "payload": payload})
 
 
 def token_store_for(settings: Settings) -> TokenStore:
@@ -125,6 +166,26 @@ def token_store_for(settings: Settings) -> TokenStore:
             settings.gcp_project, settings.refresh_token_secret
         )
     return FileTokenStore(settings.refresh_token_path)
+
+
+def producer_token_store(settings: Settings, uid: str) -> TokenStore:
+    """Where one producer's refresh token lives.
+
+    One secret per producer rather than one shared secret holding a map of
+    them. A map would need only a single Secret Manager binding, which is
+    tempting, but Secret Manager has no compare-and-swap: two producers
+    connecting at once would read the same version and one would overwrite the
+    other's token. Losing a credential that way is silent, and the producer who
+    lost it finds out days later when their negotiations have not moved.
+
+    Falls back to the file store when that is the configured backend, so a
+    laptop with no GCP project can still exercise the flow.
+    """
+    if settings.token_backend is TokenBackend.SECRET_MANAGER:
+        return SecretManagerTokenStore(
+            settings.gcp_project, f"{settings.refresh_token_secret}-{uid}"
+        )
+    return FileTokenStore(settings.token_dir / f"gmail_refresh_token_{uid}.json")
 
 
 def client_credentials(settings: Settings) -> tuple[str, str]:
@@ -226,22 +287,76 @@ def _walk_parts(payload: dict[str, Any]) -> tuple[str, list[str]]:
     return body_text.strip(), attachments
 
 
+@dataclass(frozen=True)
+class ThreadMessage:
+    """One message in a conversation, with the labels Gmail files it under.
+
+    Only ``inspect_thread`` returns these. The loop deliberately never sees a
+    label: it is handed ``RawInbound`` and cannot tell a read message from an
+    unread one, because deciding that is the transport's job and doing it in
+    two places is how a message gets filed twice.
+    """
+
+    inbound: RawInbound
+    labels: frozenset[str]
+
+    @property
+    def is_unread(self) -> bool:
+        return "UNREAD" in self.labels
+
+    @property
+    def is_ours(self) -> bool:
+        """Sent by us. Gmail keeps our own outbound in the same thread."""
+        return "SENT" in self.labels
+
+
+@dataclass(frozen=True)
+class Sender:
+    """Whose name and address go in the From line.
+
+    Was a pair of global settings, when there was one mailbox. Now that a
+    producer connects their own Gmail it belongs to the transport, because the
+    address a supplier sees has to be the address that actually sent the
+    message — Gmail rewrites a From header that does not match the
+    authenticated account, so getting this wrong does not fail loudly, it just
+    quietly sends as somebody else.
+    """
+
+    email: str
+    display_name: str
+
+    @property
+    def header(self) -> str:
+        return f"{self.display_name} <{self.email}>"
+
+
 class GmailTransport:
     """Send and poll one mailbox over the Gmail API."""
 
     _service: Any
     _settings: Settings
+    _sender: Sender
 
-    def __init__(self, service: Any, settings: Settings) -> None:
+    def __init__(
+        self, service: Any, settings: Settings, sender: Sender | None = None
+    ) -> None:
         self._service = service
         self._settings = settings
+        # Falls back to the configured identity, which is what the single
+        # shared mailbox used and what the smoke check still runs on.
+        self._sender = sender or Sender(
+            email=settings.agent_email, display_name=settings.agent_display_name
+        )
 
     @classmethod
     def from_credentials(
-        cls, credentials: Credentials, settings: Settings
+        cls,
+        credentials: Credentials,
+        settings: Settings,
+        sender: Sender | None = None,
     ) -> GmailTransport:
         service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
-        return cls(service, settings)
+        return cls(service, settings, sender)
 
     async def send(
         self,
@@ -262,11 +377,9 @@ class GmailTransport:
         """
         message = EmailMessage()
         message["To"] = to
-        message["From"] = (
-            f"{self._settings.agent_display_name} <{self._settings.agent_email}>"
-        )
+        message["From"] = self._sender.header
         message["Subject"] = subject
-        rfc822_id = make_msgid(domain=self._settings.agent_email.split("@")[-1])
+        rfc822_id = make_msgid(domain=self._sender.email.split("@")[-1])
         message["Message-ID"] = rfc822_id
         if in_reply_to:
             message["In-Reply-To"] = in_reply_to
@@ -296,64 +409,217 @@ class GmailTransport:
         )
 
     async def poll(self, *, threads: frozenset[str] | None = None) -> list[RawInbound]:
-        """Read unread mail belonging to conversations we started.
+        """Read unread replies in the conversations we started.
 
-        ``threads`` is those conversations. Only messages in them are returned,
-        and **only those have UNREAD cleared**. Pass nothing and the mailbox is
-        inspected without being modified.
+        ``threads`` is those conversations, and each is fetched **by id**. The
+        mailbox is never listed, so nothing can be paged out of view and
+        nothing outside our own threads is touched. Only messages returned have
+        UNREAD cleared.
 
-        This used to mark every unread message read before the tick loop
-        decided whether it belonged to a negotiation at all — the loop then
-        counted the rest as ``unmatched_replies`` and dropped them, after the
-        transport had already consumed them. Run against a mailbox that was
-        also somebody's personal inbox, it cleared a hundred unrelated messages
-        in one pass. Clearing UNREAD cannot be undone, so the destructive half
-        now requires the caller to say what it owns.
+        Two bugs live here, both found on a real mailbox, and both silent:
 
-        Returns oldest first. Gmail lists newest first, so the result is
-        reversed — otherwise a supplier who sent two messages between ticks
-        would have them filed in the wrong order in the timeline.
+        The transport used to mark every unread message read before the tick
+        loop decided whether it belonged to a negotiation. On an account that
+        was also somebody's personal inbox that consumed a hundred unrelated
+        messages in one pass, and clearing UNREAD cannot be undone.
+
+        Worse, it found those messages with ``messages.list``, which returns at
+        most a hundred per page and was called without paging. A supplier's
+        reply on a busy mailbox simply fell off page one and was never read —
+        the negotiation then ran out its rounds and closed as though nobody had
+        answered. Nothing errored and nothing logged. Fetching known threads
+        directly makes the cost scale with live negotiations rather than with
+        the size of somebody's inbox, and makes that failure impossible rather
+        than unlikely.
+
+        Returns oldest first within each thread, which is the order Gmail
+        stores them — a supplier who sends twice between ticks must not have
+        them filed backwards in the timeline.
+        """
+        if threads is None:
+            return await self._inspect()
+
+        received: list[RawInbound] = []
+        for thread_id in sorted(threads):
+            thread = await self._fetch_thread(thread_id)
+            if thread is None:
+                # Deleted, or never ours. One missing thread must not stop a
+                # tick that has other negotiations to advance.
+                continue
+
+            for message in thread.get("messages") or []:
+                labels: list[str] = message.get("labelIds") or []
+                if "UNREAD" not in labels:
+                    continue  # already filed on an earlier tick
+                if "SENT" in labels:
+                    continue  # our own outbound, echoed back in the thread
+
+                received.append(self._to_inbound(message, thread_id))
+                await self._mark_read(str(message["id"]))
+
+        return received
+
+    async def inspect_thread(self, thread_id: str) -> list[ThreadMessage]:
+        """Every message in one conversation, read or unread, changing nothing.
+
+        ``poll`` answers "what is new", and can only ever say "nothing" — which
+        is the same word for a reply that has not arrived and a reply that was
+        opened in Gmail before we got to it. Opening a message clears UNREAD,
+        so a person checking their own mailbox destroys the only evidence poll
+        works from.
+
+        For the product that distinction does not arise: the tick reads a
+        mailbox nobody else is looking at. For a person verifying by hand it is
+        the whole question, so this answers it directly rather than by
+        inference. Marks nothing, so asking is free.
+
+        An absent thread is an empty list, not an error — it is a question, and
+        "there is nothing there" is a real answer to it.
+        """
+        thread = await self._fetch_thread(thread_id)
+        if thread is None:
+            return []
+        return [
+            ThreadMessage(
+                inbound=self._to_inbound(message, thread_id),
+                labels=frozenset(message.get("labelIds") or []),
+            )
+            for message in thread.get("messages") or []
+        ]
+
+    async def connected_address(self) -> str:
+        """Which mailbox this credential actually opens.
+
+        Asked at connect time rather than assumed from the Firebase account: a
+        producer may well sign in with one Google account and authorise a
+        different one, and it is this address that ends up in a supplier's From
+        line. Guessing it would mean the panel telling a producer they are
+        sending as an address they are not.
+        """
+        profile = await asyncio.to_thread(
+            lambda: self._service.users().getProfile(userId="me").execute()
+        )
+        return str(profile.get("emailAddress") or "")
+
+    async def restore_unread(self, thread_id: str) -> list[str]:
+        """Put UNREAD back on the replies in one thread. Returns what changed.
+
+        The exact mirror of ``_mark_read``, and the only write in this class
+        outside sending. It exists because the live round-trip check had no way
+        to re-arm itself: proving ``poll`` returns a reply needs an unread
+        reply, and once one has been read the only way back was to ask a person
+        to send another and then not look at their own inbox. That failed three
+        times, which is a fair sign it was the wrong instruction to be giving.
+
+        Scoped to a single named thread on purpose. It cannot re-arm a mailbox,
+        only a conversation we started, and it is not on ``MailTransport`` — the
+        tick loop has no way to reach it and no reason to. Reversible by
+        definition: the next poll clears the label again, which is the point.
+
+        ``SENT`` messages are skipped. Poll ignores our own outbound anyway, so
+        marking it unread would put nothing but noise in somebody's inbox.
+        """
+        thread = await self._fetch_thread(thread_id)
+        if thread is None:
+            return []
+
+        rearmed: list[str] = []
+        for message in thread.get("messages") or []:
+            labels: list[str] = message.get("labelIds") or []
+            if "SENT" in labels:
+                continue
+            message_id = str(message["id"])
+            await self._mark_unread(message_id)
+            rearmed.append(message_id)
+        return rearmed
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+        include_spam_trash: bool = False,
+    ) -> list[ThreadMessage]:
+        """Run one Gmail search and read what it finds. Marks nothing.
+
+        For looking at a mailbox by hand. Deliberately not what the loop uses:
+        capped and unpaged, so it is a sample and never a complete view — which
+        is precisely the property that made ``messages.list`` the wrong thing
+        to build the loop on.
+
+        ``include_spam_trash`` is the reason this takes an argument at all.
+        Gmail defaults it to false, so every listing this system has ever run
+        has been blind to SPAM and TRASH. A supplier's reply that gets filtered
+        is sitting somewhere we have never once looked, and from the panel that
+        is indistinguishable from a supplier who never wrote back. Diagnostics
+        need to see it; nothing in the loop passes it.
+
+        Returns oldest first — Gmail lists newest first, and reading a
+        conversation backwards is how you misjudge who said what last.
         """
         listing = await asyncio.to_thread(
             lambda: (
                 self._service.users()
                 .messages()
-                .list(userId="me", q=self._settings.poll_query)
+                .list(
+                    userId="me",
+                    q=query,
+                    maxResults=limit,
+                    includeSpamTrash=include_spam_trash,
+                )
                 .execute()
             )
         )
 
-        received: list[RawInbound] = []
+        found: list[ThreadMessage] = []
         for stub in reversed(listing.get("messages") or []):
-            message_id = str(stub["id"])
-            full = await self._fetch(message_id)
-
-            payload: dict[str, Any] = full.get("payload") or {}
-            headers: list[dict[str, str]] = payload.get("headers") or []
-            body, attachments = _walk_parts(payload)
-
-            thread = str(full.get("threadId") or "")
-            if threads is not None and thread not in threads:
-                # Not ours. Not read, not returned, not touched.
-                continue
-
-            received.append(
-                RawInbound(
-                    message_id=message_id,
-                    rfc822_message_id=_header(headers, "Message-ID"),
-                    thread_id=thread,
-                    from_email=_header(headers, "From"),
-                    subject=_header(headers, "Subject"),
-                    body=body,
-                    has_attachments=bool(attachments),
-                    attachment_filenames=attachments,
+            full = await self._fetch(str(stub["id"]))
+            found.append(
+                ThreadMessage(
+                    inbound=self._to_inbound(full, str(full.get("threadId") or "")),
+                    labels=frozenset(full.get("labelIds") or []),
                 )
             )
+        return found
 
-            if threads is not None:
-                await self._mark_read(message_id)
+    async def _inspect(self) -> list[RawInbound]:
+        """The read-only sample behind ``poll()`` with no threads named.
 
-        return received
+        Unwraps to ``RawInbound`` so ``MailTransport`` keeps one shape and the
+        loop cannot tell the two mailbox implementations apart.
+        """
+        found = await self.search(self._settings.poll_query)
+        return [message.inbound for message in found]
+
+    def _to_inbound(self, message: dict[str, Any], thread_id: str) -> RawInbound:
+        payload: dict[str, Any] = message.get("payload") or {}
+        headers: list[dict[str, str]] = payload.get("headers") or []
+        body, attachments = _walk_parts(payload)
+        return RawInbound(
+            message_id=str(message["id"]),
+            rfc822_message_id=_header(headers, "Message-ID"),
+            thread_id=thread_id,
+            from_email=_header(headers, "From"),
+            subject=_header(headers, "Subject"),
+            body=body,
+            has_attachments=bool(attachments),
+            attachment_filenames=attachments,
+        )
+
+    async def _fetch_thread(self, thread_id: str) -> dict[str, Any] | None:
+        try:
+            return await asyncio.to_thread(
+                lambda: (
+                    self._service.users()
+                    .threads()
+                    .get(userId="me", id=thread_id, format="full")
+                    .execute()
+                )
+            )
+        except HttpError as exc:
+            if exc.resp.status == 404:
+                return None
+            raise
 
     async def _fetch(self, message_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(
@@ -361,6 +627,21 @@ class GmailTransport:
                 self._service.users()
                 .messages()
                 .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+        )
+
+    async def _mark_unread(self, message_id: str) -> None:
+        """Set UNREAD. Only ``restore_unread`` calls this."""
+        _ = await asyncio.to_thread(
+            lambda: (
+                self._service.users()
+                .messages()
+                .modify(
+                    userId="me",
+                    id=message_id,
+                    body={"addLabelIds": ["UNREAD"]},
+                )
                 .execute()
             )
         )
