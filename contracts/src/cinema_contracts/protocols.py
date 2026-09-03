@@ -58,10 +58,15 @@ class AgentBrain(Protocol):
         mention. "He remembered his father's watch" needs no watch. "The room
         smelled of rain" needs no rain.
 
-        Return an empty list if the document contains no recognisable props. Do
-        not pad it out with plausible-sounding set dressing — a short honest
-        list is recoverable, an invented one sends the agent off negotiating for
-        things the production does not need.
+        "Needs to exist" is wider than what an actor picks up. A production has
+        to source the chairs as well as the cup: furniture, décor, signage and
+        the clothes the script puts a character in are all things somebody has
+        to buy, and ``category`` is where they are told apart.
+
+        Return an empty list if the document contains no recognisable items. Do
+        not pad it out with plausible-sounding things the script never names —
+        a short honest list is recoverable, an invented one sends the agent off
+        negotiating for things the production does not need.
         """
         ...
 
