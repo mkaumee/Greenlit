@@ -416,25 +416,14 @@ list_models() {
 # authentication errors are the deterministic ones; a timeout or a network blip
 # warns and continues, exactly as the Vertex probe does.
 probe_research_key() {
-  PARALLEL_API_KEY="$PARALLEL_API_KEY" uv run python - <<'PYEOF'
-import os
-import sys
-
-from parallel import AuthenticationError, ParallelError, PermissionDeniedError, Parallel
-
-try:
-    client = Parallel(api_key=os.environ["PARALLEL_API_KEY"])
-    _ = client.search(objective="ping", search_queries=["ping"], mode="basic",
-                      max_chars_total=1000)
-except (AuthenticationError, PermissionDeniedError) as exc:
-    print(f"    {type(exc).__name__}: {str(exc).splitlines()[0][:160]}", file=sys.stderr)
-    sys.exit(1)
-except ParallelError as exc:
-    # Not proof the key is bad — a timeout, a rate limit, an outage.
-    print(f"    {type(exc).__name__}: {str(exc).splitlines()[0][:160]}", file=sys.stderr)
-    sys.exit(2)
-sys.exit(0)
-PYEOF
+  # Delegates to scripts/check_research.py rather than inlining the call a
+  # second time. The preflight and the manual check have to be testing the same
+  # thing or one of them is decoration — same reason intake.py exists.
+  #
+  # Exit codes come from that script: 0 works, 1 refused, 2 could not tell.
+  PARALLEL_API_KEY="$PARALLEL_API_KEY" uv run python \
+    "$(dirname "$0")/check_research.py" 2>&1 | sed 's/^/    /'
+  return "${PIPESTATUS[0]}"
 }
 
 case "$BRAIN_BACKEND" in

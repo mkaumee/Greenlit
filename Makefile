@@ -24,7 +24,7 @@ APPROVALS_SERVICE ?= cinema-approvals
 API_SERVICE ?= cinema-api
 
 .PHONY: help setup fmt lint types guard test test-all rules-test check emulator e2e image clean
-.PHONY: gcp-setup deploy-rules deploy verify-deploy redirect-uri require-firebase require-gcloud require-project
+.PHONY: gcp-setup deploy-rules deploy verify-deploy redirect-uri check-research require-firebase require-gcloud require-project
 .PHONY: web-dev web-build deploy-web seed gmail-smoke
 
 help:
@@ -122,6 +122,14 @@ deploy: require-gcloud require-project ## Deploy both Cloud Run services and the
 
 verify-deploy: require-gcloud require-project ## Check a deployment — read-only, and the real definition of done
 	PROJECT_ID=$(PROJECT_ID) ./scripts/verify_deploy.sh
+
+# The direct answer to "is web search actually working", which was otherwise a
+# choice between a full deploy and reading price bands for signs of invention.
+# Tests the key the DEPLOYED tick holds, not the one in your shell — this
+# project ran for days on the literal word `your-key` while every local check
+# passed.
+check-research: require-gcloud require-project ## Make one real Parallel search and report
+	uv run python scripts/check_research.py --from-deployment --project-id $(PROJECT_ID)
 
 # Needed before any producer can connect a mailbox, and needed again whenever
 # somebody asks "what was that URL". Read-only, so it costs nothing to re-run.
