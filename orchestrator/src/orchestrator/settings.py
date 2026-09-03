@@ -122,16 +122,21 @@ class Settings(BaseSettings):
     live, and with which model, for that reason.
     """
 
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.7-flash"
     """Which Gemini model Role A's brain reasons with.
 
-    This default was ``gemini-3.7-flash`` — Gemini's shape with Claude's
-    numbering, and a model no Vertex project serves. Every reasoning call
-    returned 404 and nothing said so: the tick parked its rows, and the chat
-    fell back to stored facts, both of which look like a system that is merely
-    quiet. ``scripts/deploy.sh`` now asks Vertex whether the configured model
-    answers before it deploys anything, so a wrong name here is caught at
-    deploy time rather than by reading prose a week later.
+    Half of an answer on its own. The same name is served in some Vertex
+    locations and not others, so this travels with ``GOOGLE_CLOUD_LOCATION``
+    and only the pair means anything — a valid model sent to a location that
+    does not serve it returns the identical 404 to a name that does not exist.
+
+    That pair is what took this deployment down for a day: the model was fine
+    and ``scripts/deploy.sh`` was overriding the location with the Cloud Run
+    region. Every reasoning call 404'd, and nothing said so — the tick parked
+    its rows and the chat fell back to stored facts, both of which look like a
+    system that is merely quiet. The deploy now makes one real
+    ``generateContent`` call before it builds anything, so a bad pair is
+    refused at deploy time rather than found by reading prose a week later.
 
     Configuration rather than a literal, and passed explicitly rather than read
     from the environment inside main-agent — GeminiAgentBrain requires it as a

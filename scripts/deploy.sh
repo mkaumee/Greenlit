@@ -112,12 +112,11 @@ TOKEN_WRITER_ROLE="${TOKEN_WRITER_ROLE:-cinemaTokenWriter}"
 # reasoning or the transport.
 BRAIN_BACKEND="${BRAIN_BACKEND:-scripted}"
 
-# The default is verified against Vertex in the preflight below rather than
-# trusted. It has to be, because the previous default was `gemini-3.7-flash` —
-# a name with Gemini's shape and Claude's numbering, which no Vertex project
-# serves — and nothing anywhere said so until a producer asked the chat a
-# question and got the deterministic fallback.
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+# Verified against Vertex in the preflight below rather than trusted, because
+# a model name is only half of an answer: the same name is served in some
+# locations and not others, and a wrong pair 404s every reasoning call while
+# looking, from every screen, like a system that is merely quiet.
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.7-flash}"
 
 # Role A's researcher searches the web through Parallel, and that SDK reads
 # this name itself. Declared with a default because `set -u` is on: referenced
@@ -132,7 +131,13 @@ PARALLEL_API_KEY="${PARALLEL_API_KEY:-}"
 # no secret sitting in an env var that `gcloud run describe` prints back.
 # google-genai reads exactly these three names — confirmed against the
 # installed SDK, not recalled.
-VERTEX_LOCATION="${VERTEX_LOCATION:-$REGION}"
+# Not $REGION. That is where the *container* runs; this is where Vertex serves
+# a model, and they are unrelated. Tying them together is what turned a
+# deliberate GOOGLE_CLOUD_LOCATION=global into us-central1 and 404'd every
+# call — the newest models reach the global endpoint before any regional one,
+# and google-genai's own default when no location is set is `global`
+# (_api_client.py, confirmed against the installed SDK).
+VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
 
 # The panel is served from Firebase Hosting and this service from Cloud Run, so
 # every approval a producer makes is a cross-origin POST. Without these origins
@@ -313,15 +318,17 @@ say "Preflight — the brain"
 # Nothing errors, nothing logs, and the negotiation emails look fine. Caught
 # here, and again at container startup, because it is not detectable later.
 
-# The Vertex endpoint for a location. `global` is not a regional prefix — it
-# has its own hostname — and getting that wrong produces a DNS failure rather
-# than an API error, which reads like a network problem.
+# The Vertex endpoint for a location. Three shapes, copied from the SDK's own
+# logic (google/genai/_api_client.py) rather than guessed, because two of them
+# are not `{location}-aiplatform`: `global` has its own hostname, and `us`/`eu`
+# are multi-regional. Getting it wrong is a DNS failure, which reads like a
+# network problem rather than a configuration one.
 vertex_host() {
-  if [[ "$VERTEX_LOCATION" == "global" ]]; then
-    echo "aiplatform.googleapis.com"
-  else
-    echo "${VERTEX_LOCATION}-aiplatform.googleapis.com"
-  fi
+  case "$VERTEX_LOCATION" in
+    global) echo "aiplatform.googleapis.com" ;;
+    us | eu) echo "aiplatform.${VERTEX_LOCATION}.rep.googleapis.com" ;;
+    *) echo "${VERTEX_LOCATION}-aiplatform.googleapis.com" ;;
+  esac
 }
 
 # 200 means the configured model answers. 404 means it does not exist here and
@@ -334,7 +341,7 @@ probe_model() {
   status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $(gcloud auth print-access-token)" \
     -H "Content-Type: application/json" \
-    "https://${host}/v1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent" \
+    "https://${host}/v1beta1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent" \
     -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1}}' \
     2>/dev/null || echo 000)
 
@@ -342,21 +349,29 @@ probe_model() {
     200) return 0 ;;
     404)
       cat >&2 <<EOF
-  ✗ Vertex has no model '$GEMINI_MODEL' in '$VERTEX_LOCATION' for this project.
+  ✗ '$GEMINI_MODEL' is not reachable in '$VERTEX_LOCATION' for this project.
 
-  Every reasoning call would 404: no props read from a screenplay, no research,
-  no negotiation email, and a chat that silently answers from stored records.
-  Refusing rather than deploying that.
+  That is not the same as the model not existing. Vertex returns one 404 for
+  both "no such model" and "not served here, or not enabled for you", so the
+  location is the first thing to suspect and the name is the second.
 
-  What this project can actually serve:
+  Every reasoning call would fail: no props read from a screenplay, no
+  research, no negotiation email, and a chat that answers from stored records
+  while looking like a system that is merely quiet. Refusing rather than
+  deploying that.
+
+  Try the other endpoint first — the newest models reach it before any
+  regional one:
+
+    VERTEX_LOCATION=global BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
+
+  What this project can serve in '$VERTEX_LOCATION':
 
 EOF
       list_models >&2
       cat >&2 <<EOF
 
     GEMINI_MODEL=<one of those> BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
-
-  Another region instead:  VERTEX_LOCATION=global $0
 
   Nothing has been changed.
 EOF
@@ -411,15 +426,19 @@ EOF
     # Does that model actually exist, here, for this project?
     #
     # This line used to print a green tick beside whatever string was in
-    # GEMINI_MODEL and check nothing. `gemini-3.7-flash` sat in it as the
-    # default — a name that looks like a Gemini model and is not one — and
-    # every reasoning call 404'd. Nothing surfaced until somebody asked the
-    # chat a question and got the deterministic fallback, because a tick and
-    # an unverified string look identical.
+    # GEMINI_MODEL and check nothing at all — and a tick beside an unverified
+    # string is indistinguishable from a tick beside a working one. Every
+    # reasoning call was 404ing and nothing surfaced until somebody asked the
+    # chat a question and got the deterministic fallback.
+    #
+    # Both halves are checked here, because the failure was the *pair*: a real
+    # model name sent to a location that does not serve it.
     #
     # Probed with the real call rather than a metadata lookup: generateContent
-    # is exactly what the services do, so a 200 here means the thing that will
-    # run works. One token, a fraction of a cent.
+    # on v1beta1 is exactly what google-genai does, so a 200 here means the
+    # thing that will run works. One token, a fraction of a cent. The API
+    # version matters — the SDK pins v1beta1, and a probe on v1 could refuse a
+    # deploy over a model that is perfectly fine.
     if ! probe_model; then
       exit 6
     fi
