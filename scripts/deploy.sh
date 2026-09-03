@@ -408,6 +408,33 @@ case "$BRAIN_BACKEND" in
     echo "    Turn on the real one:  BRAIN_BACKEND=main-agent"
     ;;
   main-agent)
+    # The placeholder check, and it is not pedantry. `-z` cannot tell a key
+    # from the word people paste when a command says PARALLEL_API_KEY=your-key
+    # — and an invalid key is worse than a missing one. Missing refuses at
+    # startup and is loud; invalid gets past every check here, then the search
+    # call raises, researcher.py catches it, and the model is told "web search
+    # failed" and answers from memory anyway. Out come reference price bands
+    # and supplier URLs with nothing behind them, in a system whose whole claim
+    # is that it keeps the URLs it got its numbers from.
+    case "${PARALLEL_API_KEY,,}" in
+      your-key | your-api-key | your_key | api-key | changeme | xxx | todo | "<key>")
+        cat >&2 <<EOF
+  ✗ PARALLEL_API_KEY is '$PARALLEL_API_KEY', which is the placeholder from the
+    command, not a key.
+
+  Worth refusing rather than shrugging at: an invalid key does not fail loudly
+  the way a missing one does. Research answers anyway, from memory, and its
+  price bands and supplier URLs are then invented rather than sourced — with
+  nothing on any screen to say so.
+
+    PARALLEL_API_KEY=<the real one> BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
+
+  Nothing has been changed.
+EOF
+        exit 7
+        ;;
+    esac
+
     if [[ -z "$PARALLEL_API_KEY" ]]; then
       cat >&2 <<EOF
   ✗ BRAIN_BACKEND=main-agent, but PARALLEL_API_KEY is not set.
