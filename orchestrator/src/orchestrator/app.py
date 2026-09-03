@@ -295,13 +295,21 @@ class Health(BaseModel):
     Vertex means the service account signs its own calls and there is no key
     anywhere in the deployment. Worth reporting rather than assuming, because
     the two look identical from the outside until one of them leaks."""
-    research_web_search: bool
-    """Whether item research can actually search the web.
+    research_key_present: bool
+    """Whether a research key is configured. Not whether it works.
 
-    False means it still answers, from the model's memory, with price bands and
-    supplier URLs that were invented rather than sourced. Startup refuses this
-    combination, so a running service reporting false would mean the check was
-    removed — which is worth being able to see from outside."""
+    Named for what it can actually prove. This was ``research_web_search``,
+    which read as "item research can search the web" and was computed as
+    ``bool(os.environ.get("PARALLEL_API_KEY"))`` — so it reported true for a
+    deployment whose key was the literal word ``your-key``, while every search
+    failed and the model answered from memory with price bands and supplier
+    URLs it had invented.
+
+    A field that claims more than it checked is worse than no field: it is the
+    thing somebody looks at to rule the problem out. Whether the key *works* is
+    checked where it can be — once, at deploy time, against the real API — and
+    a failure at run time is now logged by ``search_web`` rather than
+    swallowed."""
     mail_backend: str
     token_backend: str
     project: str
@@ -371,7 +379,7 @@ async def health(request: Request) -> Health:
         brain_backend=settings.brain_backend.value,
         gemini_model=settings.gemini_model if real_brain else "",
         gemini_credentials=gemini_credentials_route() if real_brain else "",
-        research_web_search=real_brain and bool(os.environ.get("PARALLEL_API_KEY")),
+        research_key_present=real_brain and bool(os.environ.get("PARALLEL_API_KEY")),
         mail_backend=settings.mail_backend.value,
         token_backend=settings.token_backend.value,
         project=settings.gcp_project,

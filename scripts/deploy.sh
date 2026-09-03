@@ -401,6 +401,42 @@ list_models() {
     || echo "    (could not list them — see the Model Garden in the console)"
 }
 
+# Does the research key actually work?
+#
+# Same reasoning as probe_model, and the same failure it was written for: the
+# only check here used to be `-z`, so a key that was expired, revoked, or the
+# word somebody pasted out of a command sailed through. An invalid key is worse
+# than a missing one — missing refuses at container startup and is loud, while
+# invalid gets past everything and then the search raises, researcher.py catches
+# it, and the model answers from memory. Out come price bands and supplier URLs
+# with nothing behind them.
+#
+# Through the SDK rather than a hand-rolled curl, because the SDK is what
+# search_web uses and a probe of some other surface proves something else. The
+# authentication errors are the deterministic ones; a timeout or a network blip
+# warns and continues, exactly as the Vertex probe does.
+probe_research_key() {
+  PARALLEL_API_KEY="$PARALLEL_API_KEY" uv run python - <<'PYEOF'
+import os
+import sys
+
+from parallel import AuthenticationError, ParallelError, PermissionDeniedError, Parallel
+
+try:
+    client = Parallel(api_key=os.environ["PARALLEL_API_KEY"])
+    _ = client.search(objective="ping", search_queries=["ping"], mode="basic",
+                      max_chars_total=1000)
+except (AuthenticationError, PermissionDeniedError) as exc:
+    print(f"    {type(exc).__name__}: {str(exc).splitlines()[0][:160]}", file=sys.stderr)
+    sys.exit(1)
+except ParallelError as exc:
+    # Not proof the key is bad — a timeout, a rate limit, an outage.
+    print(f"    {type(exc).__name__}: {str(exc).splitlines()[0][:160]}", file=sys.stderr)
+    sys.exit(2)
+sys.exit(0)
+PYEOF
+}
+
 case "$BRAIN_BACKEND" in
   scripted)
     printf '  \033[33m!\033[0m brain is the SCRIPTED fake — a regex and a word list.\n'
@@ -469,6 +505,34 @@ EOF
     if ! probe_model; then
       exit 6
     fi
+
+    set +e
+    probe_research_key
+    research_status=$?
+    set -e
+    case "$research_status" in
+      0) ok "research key works — search returns results" ;;
+      1)
+        cat >&2 <<EOF
+
+  ✗ Parallel refused that key.
+
+  Refusing rather than deploying: research would still answer, from the
+  model's memory, and its price bands and supplier URLs would be invented
+  rather than sourced — with nothing on any screen to say so.
+
+    PARALLEL_API_KEY=<a working key> BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
+
+  Nothing has been changed.
+EOF
+        exit 8
+        ;;
+      *)
+        printf '  \033[33m!\033[0m could not check the research key — continuing.\n'
+        echo "    Not proof it is wrong; the probe itself did not get an answer."
+        ;;
+    esac
+
     ok "brain is main-agent ($GEMINI_MODEL in $VERTEX_LOCATION), reachable"
     ;;
   *)

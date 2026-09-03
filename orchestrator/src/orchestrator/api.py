@@ -190,7 +190,7 @@ async def health(request: Request) -> Health:
     that is not.
 
     Deliberately narrower than the tick's. No ``mail_backend`` and no
-    ``research_web_search``: this service sends no mail and searches nothing,
+    ``research_key_present``: this service sends no mail and searches nothing,
     and a health endpoint reporting fields its service does not use is one
     people stop believing.
     """

@@ -43,6 +43,13 @@ export interface ReferenceBand {
   low?: Money;
   high?: Money;
   note?: string;
+  /** The pages the numbers came from.
+   *
+   * Stored on every item since research first ran, and dropped here until now:
+   * this interface declared only the range, so the panel rendered a band with
+   * no way to tell a researched number from one the model remembered. That is
+   * the opposite of the claim the whole system rests on. */
+  source_urls?: string[];
 }
 
 /** A line of the screenplay this prop was found in — the evidence a producer

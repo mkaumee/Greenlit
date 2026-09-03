@@ -1,6 +1,7 @@
 """Research defensible prices and potential suppliers for one item."""
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false
 
+import logging
 from typing import final
 
 from cinema_contracts import ItemBrief, ItemResearch
@@ -13,6 +14,8 @@ from parallel import (
 
 from main_agent.gemini_schema import gemini_output_schema
 from main_agent.runtime import AdkAgentRuntime
+
+log = logging.getLogger("main_agent.research")
 
 _INSTRUCTION = """You research one film-production procurement item.
 Use search_web whenever current web information is needed. For every call, create
@@ -62,6 +65,21 @@ async def search_web(
                 max_chars_total=12_000,
             )
     except ParallelError:
+        # Two audiences, two messages. The model is told to retry, which is the
+        # only thing it can usefully do. The operator is told the search
+        # failed, which is the only way anyone finds out.
+        #
+        # This used to return and log nothing. An unusable key — expired,
+        # revoked, or the word somebody pasted out of a command — then produced
+        # a model that answered from memory: a reference price band and
+        # supplier URLs with nothing behind them, indistinguishable on screen
+        # from researched ones, in a system whose whole claim is that it keeps
+        # the URLs it got its numbers from. Nothing errored and nothing logged.
+        log.warning(
+            "parallel search failed; the model will answer without sources",
+            exc_info=True,
+            extra={"objective": normalized_objective[:200]},
+        )
         return {
             "error": (
                 "Web search failed. Retry with fewer or more focused search queries."

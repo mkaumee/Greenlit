@@ -7,6 +7,7 @@
  * asks, and the one number that matters is how many items are still moving.
  */
 
+import { Sources } from "@/components/Sources";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -94,9 +95,19 @@ export function Breakdown({
                   </TableCell>
                   <TableCell>{money(best)}</TableCell>
                   <TableCell className="text-muted-foreground">
-                    {item.reference_band === undefined
-                      ? "—"
-                      : `${money(item.reference_band.low)}–${money(item.reference_band.high)}`}
+                    {item.reference_band === undefined ? (
+                      "—"
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        <span>
+                          {money(item.reference_band.low)}–
+                          {money(item.reference_band.high)}
+                        </span>
+                        {/* The receipts, or the absence of them. A range with
+                            nothing under it is a number nobody can check. */}
+                        <Sources urls={item.reference_band.source_urls} />
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {simTime(item.next_action_due_at)}

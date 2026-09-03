@@ -109,13 +109,13 @@ async def test_health_says_which_brain_is_wired(api: httpx.AsyncClient) -> None:
 async def test_health_does_not_report_what_this_service_does_not_do(
     api: httpx.AsyncClient,
 ) -> None:
-    """No mail_backend, no research_web_search. This service sends no mail and
+    """No mail_backend, no research_key_present. This service sends no mail and
     searches nothing, and a health endpoint reporting fields its service does
     not use is one people stop reading."""
     body = (await api.get("/health")).json()
 
     assert "mail_backend" not in body
-    assert "research_web_search" not in body
+    assert "research_key_present" not in body
 
 
 # --------------------------------------------------------------------------- #

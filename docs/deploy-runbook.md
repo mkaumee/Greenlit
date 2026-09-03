@@ -341,7 +341,7 @@ Without it the search call raises, the researcher catches it, and the model is
 told "web search failed" — so it answers anyway, from memory, and its price
 bands and supplier URLs are invented rather than sourced. Nothing errors and
 nothing logs. The deploy refuses that combination, the service refuses to start
-on it, and `/health` reports `research_web_search` so a service that lost the
+on it, and `/health` reports `research_key_present` so a service that lost the
 check is visible from outside.
 
 **Do not turn the brain and real mail on in the same deploy.** If the first

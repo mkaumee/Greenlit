@@ -123,7 +123,7 @@ async def test_health_says_which_transports_are_wired(api: httpx.AsyncClient) ->
     # from outside the container.
     assert body["gemini_model"] == ""
     assert body["gemini_credentials"] == ""
-    assert body["research_web_search"] is False
+    assert body["research_key_present"] is False
 
 
 # --------------------------------------------------------------------------- #
