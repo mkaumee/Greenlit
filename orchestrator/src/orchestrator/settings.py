@@ -122,8 +122,16 @@ class Settings(BaseSettings):
     live, and with which model, for that reason.
     """
 
-    gemini_model: str = "gemini-3.7-flash"
+    gemini_model: str = "gemini-2.5-flash"
     """Which Gemini model Role A's brain reasons with.
+
+    This default was ``gemini-3.7-flash`` — Gemini's shape with Claude's
+    numbering, and a model no Vertex project serves. Every reasoning call
+    returned 404 and nothing said so: the tick parked its rows, and the chat
+    fell back to stored facts, both of which look like a system that is merely
+    quiet. ``scripts/deploy.sh`` now asks Vertex whether the configured model
+    answers before it deploys anything, so a wrong name here is caught at
+    deploy time rather than by reading prose a week later.
 
     Configuration rather than a literal, and passed explicitly rather than read
     from the environment inside main-agent — GeminiAgentBrain requires it as a

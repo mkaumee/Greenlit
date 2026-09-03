@@ -111,7 +111,13 @@ TOKEN_WRITER_ROLE="${TOKEN_WRITER_ROLE:-cinemaTokenWriter}"
 # live email to a real seller reads badly, you want to know whether it was the
 # reasoning or the transport.
 BRAIN_BACKEND="${BRAIN_BACKEND:-scripted}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.7-flash}"
+
+# The default is verified against Vertex in the preflight below rather than
+# trusted. It has to be, because the previous default was `gemini-3.7-flash` —
+# a name with Gemini's shape and Claude's numbering, which no Vertex project
+# serves — and nothing anywhere said so until a producer asked the chat a
+# question and got the deterministic fallback.
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 
 # Role A's researcher searches the web through Parallel, and that SDK reads
 # this name itself. Declared with a default because `set -u` is on: referenced
@@ -307,6 +313,79 @@ say "Preflight — the brain"
 # Nothing errors, nothing logs, and the negotiation emails look fine. Caught
 # here, and again at container startup, because it is not detectable later.
 
+# The Vertex endpoint for a location. `global` is not a regional prefix — it
+# has its own hostname — and getting that wrong produces a DNS failure rather
+# than an API error, which reads like a network problem.
+vertex_host() {
+  if [[ "$VERTEX_LOCATION" == "global" ]]; then
+    echo "aiplatform.googleapis.com"
+  else
+    echo "${VERTEX_LOCATION}-aiplatform.googleapis.com"
+  fi
+}
+
+# 200 means the configured model answers. 404 means it does not exist here and
+# the deploy is refused. Anything else warns and continues: a preflight that
+# blocks a deploy on a flaky curl or a quota blip is worse than one that does
+# not, and the only unambiguous, deterministic failure is the 404.
+probe_model() {
+  local host status
+  host=$(vertex_host)
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "Content-Type: application/json" \
+    "https://${host}/v1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent" \
+    -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1}}' \
+    2>/dev/null || echo 000)
+
+  case "$status" in
+    200) return 0 ;;
+    404)
+      cat >&2 <<EOF
+  ✗ Vertex has no model '$GEMINI_MODEL' in '$VERTEX_LOCATION' for this project.
+
+  Every reasoning call would 404: no props read from a screenplay, no research,
+  no negotiation email, and a chat that silently answers from stored records.
+  Refusing rather than deploying that.
+
+  What this project can actually serve:
+
+EOF
+      list_models >&2
+      cat >&2 <<EOF
+
+    GEMINI_MODEL=<one of those> BRAIN_BACKEND=main-agent PROJECT_ID=$PROJECT_ID $0
+
+  Another region instead:  VERTEX_LOCATION=global $0
+
+  Nothing has been changed.
+EOF
+      return 1
+      ;;
+    *)
+      printf '  \033[33m!\033[0m could not check %s (HTTP %s) — continuing.\n' \
+        "$GEMINI_MODEL" "$status"
+      echo "    Not proof the model is wrong; the probe itself did not get an"
+      echo "    answer. If reasoning fails after this, that is where to look."
+      return 0
+      ;;
+  esac
+}
+
+# Best effort, and only ever printed beside a refusal. The publisher listing is
+# long and its shape has changed before, so the grep is deliberately loose and
+# an empty result is survivable — the message above still says what to do.
+list_models() {
+  local host
+  host=$(vertex_host)
+  curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    "https://${host}/v1beta1/publishers/google/models?pageSize=200" 2>/dev/null \
+    | grep -o 'publishers/google/models/gemini[A-Za-z0-9.-]*' \
+    | sed 's|publishers/google/models/|    |' \
+    | sort -u \
+    || echo "    (could not list them — see the Model Garden in the console)"
+}
+
 case "$BRAIN_BACKEND" in
   scripted)
     printf '  \033[33m!\033[0m brain is the SCRIPTED fake — a regex and a word list.\n'
@@ -329,7 +408,22 @@ case "$BRAIN_BACKEND" in
 EOF
       exit 5
     fi
-    ok "brain is main-agent ($GEMINI_MODEL), with a research key"
+    # Does that model actually exist, here, for this project?
+    #
+    # This line used to print a green tick beside whatever string was in
+    # GEMINI_MODEL and check nothing. `gemini-3.7-flash` sat in it as the
+    # default — a name that looks like a Gemini model and is not one — and
+    # every reasoning call 404'd. Nothing surfaced until somebody asked the
+    # chat a question and got the deterministic fallback, because a tick and
+    # an unverified string look identical.
+    #
+    # Probed with the real call rather than a metadata lookup: generateContent
+    # is exactly what the services do, so a 200 here means the thing that will
+    # run works. One token, a fraction of a cent.
+    if ! probe_model; then
+      exit 6
+    fi
+    ok "brain is main-agent ($GEMINI_MODEL in $VERTEX_LOCATION), reachable"
     ;;
   *)
     echo "  ✗ BRAIN_BACKEND must be 'scripted' or 'main-agent', got '$BRAIN_BACKEND'" >&2
