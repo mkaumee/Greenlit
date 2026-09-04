@@ -75,7 +75,10 @@ export function Chat({
     () => negotiations.map((n) => n.id),
     [negotiations],
   );
-  const messages = useAllMessages(projectId, negotiationIds);
+  const { rows: messages, loading: messagesLoading } = useAllMessages(
+    projectId,
+    negotiationIds,
+  );
 
   const { runtime, waiting, readScript, busy } = useGreenlitThread({
     projectId,
@@ -105,7 +108,15 @@ export function Chat({
           />
 
           <div className="flex min-h-0 flex-col">
-            <Transcript busy={busy} onScript={(file) => void readScript(file)} />
+            <Transcript
+              busy={busy}
+              // Not the same `loading` the panels get. The transcript is empty
+              // for longer: its rows come from the correspondence, which is a
+              // subscription per negotiation and cannot even start until the
+              // negotiations themselves have arrived.
+              loading={loading || messagesLoading}
+              onScript={(file) => void readScript(file)}
+            />
           </div>
 
           <aside className="flex min-h-0 flex-col overflow-hidden">

@@ -345,7 +345,7 @@ export function useMessages(projectId: string, negotiationId: string) {
 export function useAllMessages(
   projectId: string,
   negotiationIds: string[],
-): Record<string, Message[]> {
+): { rows: Record<string, Message[]>; loading: boolean } {
   const [byNegotiation, setByNegotiation] = useState<Record<string, Message[]>>({});
   const key = negotiationIds.join(",");
 
@@ -381,7 +381,15 @@ export function useAllMessages(
     return () => stops.forEach((stop) => stop());
   }, [projectId, key]);
 
-  return byNegotiation;
+  // Every subscription writes its own key on its first snapshot, including the
+  // failure path, so a short count means at least one negotiation has not
+  // reported yet. Worth telling the transcript about: this is the window where
+  // it has negotiations but no correspondence, which looks exactly like a
+  // production nobody has uploaded a script to.
+  const expected = key === "" ? 0 : key.split(",").length;
+  const loading = expected > 0 && Object.keys(byNegotiation).length < expected;
+
+  return { rows: byNegotiation, loading };
 }
 
 export function useItem(projectId: string, itemId: string) {

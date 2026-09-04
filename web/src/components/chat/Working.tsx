@@ -62,36 +62,66 @@ export function Working({ busy }: { busy: Busy }) {
 }
 
 /**
- * Three dots, staggered.
+ * Three dots that count themselves out: none, one, two, three, gone.
  *
- * The one piece of motion here that is doing a job rather than decorating: a
- * static row of dots and an animated one are the difference between "it is
- * thinking" and "it stopped there". Under `prefers-reduced-motion` they hold
- * still and the label carries the meaning on its own.
+ * The first version pulsed all three on a staggered sine, which reads as a
+ * wave rolling through something already there. This builds instead — the dots
+ * arrive one at a time and clear together — because that is the shape of
+ * waiting: progress, then round again. It is the difference between "this is
+ * decorated" and "this is counting".
+ *
+ * The rhythm is in `times` rather than in three different delays. A delay
+ * offsets an identical loop per dot, which is the wave again; keyframes at
+ * fixed points in one shared cycle are what make the three land in sequence
+ * and leave together.
+ *
+ * Under `prefers-reduced-motion` they hold still at full opacity and the label
+ * carries the meaning on its own.
  */
 function Dots() {
   const still = useReducedMotion();
 
   return (
     <span className="mt-1.5 flex shrink-0 gap-1" aria-hidden>
-      {[0, 1, 2].map((i) => (
-        <motion.span
-          key={i}
-          className="size-1.5 rounded-full bg-current"
-          animate={still ? undefined : { opacity: [0.25, 1, 0.25] }}
-          transition={
-            still
-              ? undefined
-              : {
-                  duration: 1.1,
-                  repeat: Infinity,
-                  ease: "easeInOut",
-                  // The stagger is what reads as travel rather than a blink.
-                  delay: i * 0.16,
-                }
-          }
-        />
-      ))}
+      {[0, 1, 2].map((i) => {
+        // When this dot arrives, as a fraction of the cycle. The pair of times
+        // a hair apart is what makes it *appear* rather than fade up.
+        const at = 0.12 + i * 0.2;
+        return (
+          <motion.span
+            key={i}
+            className="size-1.5 rounded-full bg-current"
+            animate={
+              still
+                ? undefined
+                : {
+                    opacity: [0, 0, 1, 1, 0, 0],
+                    // A touch of scale so the arrival has some weight to it.
+                    scale: [0.5, 0.5, 1, 1, 0.5, 0.5],
+                  }
+            }
+            transition={
+              still
+                ? undefined
+                : {
+                    duration: 1.5,
+                    repeat: Infinity,
+                    // The last two stops are the point: clear quickly at 0.78,
+                    // then hold empty to the end of the cycle. Fading out over
+                    // the remaining time instead makes the disappearance a
+                    // slow dissolve, and the count reads as a wave again.
+                    times: [0, at - 0.02, at, 0.78, 0.86, 1],
+                    // Linear because `times` is the whole design here. An
+                    // eased curve remaps the time axis underneath them, which
+                    // measured as the three dots landing 200 ms apart instead
+                    // of the 300 written above — the rhythm drifting away from
+                    // the code that supposedly sets it.
+                    ease: "linear",
+                  }
+            }
+          />
+        );
+      })}
     </span>
   );
 }

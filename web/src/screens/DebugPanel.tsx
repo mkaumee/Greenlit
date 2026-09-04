@@ -10,6 +10,8 @@
 
 import { useState } from "react";
 
+import { Spinner } from "@/components/ui/spinner";
+
 import { useNegotiations, useProjects } from "../useNegotiations";
 import type { Money, Negotiation } from "../useNegotiations";
 
@@ -55,7 +57,11 @@ export function DebugPanel() {
       </p>
 
       {error !== "" && <p style={S.error}>{error}</p>}
-      {loading && <p>Subscribing…</p>}
+      {loading && (
+        <p style={{ display: "flex", alignItems: "center", gap: "0.5em" }}>
+          <Spinner /> Subscribing…
+        </p>
+      )}
 
       <table style={S.table}>
         <thead>

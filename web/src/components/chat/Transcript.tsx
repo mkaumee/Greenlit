@@ -29,6 +29,7 @@ import { DecisionPart } from "@/components/chat/DecisionPart";
 import { EmailPart } from "@/components/chat/EmailPart";
 import { PropsPart } from "@/components/chat/PropsPart";
 import { Working } from "@/components/chat/Working";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const TOOLS = {
   tools: {
@@ -43,11 +44,14 @@ const TOOLS = {
 export function Transcript({
   onScript,
   busy,
+  loading,
 }: {
   /** A screenplay dropped anywhere on the thread. */
   onScript: (file: File) => void;
   /** What is in flight, for the indicator below the last row. */
   busy: Busy;
+  /** True while the reads that fill this thread are still open. */
+  loading: boolean;
 }) {
   const [over, setOver] = useState(false);
 
@@ -70,8 +74,13 @@ export function Transcript({
       }}
     >
       <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto px-6 py-4">
+        {/* Inside `Empty`, so this only ever decides *why* the thread has no
+            rows. A production with twenty props and six negotiations is empty
+            for a moment on every cold load, and it was being shown the pitch
+            written for one that has never had a script — the same
+            loading-read-as-empty this pass keeps finding. */}
         <ThreadPrimitive.Empty>
-          <Empty />
+          {loading ? <Waking /> : <Empty />}
         </ThreadPrimitive.Empty>
         <ThreadPrimitive.Messages>
           {({ message }) =>
@@ -191,6 +200,25 @@ function Arrives({
     >
       {children}
     </motion.div>
+  );
+}
+
+/**
+ * Placeholders shaped like a transcript, not a spinner.
+ *
+ * Right, then left, then left: a producer's turn and two of the agent's, which
+ * is what is about to be there. The shape is the information — it says "rows
+ * are coming" where a spinner says only "wait".
+ */
+function Waking() {
+  return (
+    <div className="mt-4 space-y-3" role="status" aria-label="Loading the transcript">
+      <div className="flex justify-end">
+        <Skeleton className="h-10 w-1/3" />
+      </div>
+      <Skeleton className="h-20 w-4/5" />
+      <Skeleton className="h-16 w-2/3" />
+    </div>
   );
 }
 
