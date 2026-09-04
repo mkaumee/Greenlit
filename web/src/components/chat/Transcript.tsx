@@ -15,13 +15,20 @@
  * with no body.
  */
 
-import { ComposerPrimitive, MessagePrimitive, ThreadPrimitive } from "@assistant-ui/react";
+import {
+  ComposerPrimitive,
+  MessagePrimitive,
+  ThreadPrimitive,
+} from "@assistant-ui/react";
+import { useReducedMotion, motion } from "motion/react";
 import { useRef, useState } from "react";
 
+import type { Busy } from "@/chat/busy";
 import { DECISION_TOOL, EMAIL_TOOL, PROPS_TOOL } from "@/chat/convert";
 import { DecisionPart } from "@/components/chat/DecisionPart";
 import { EmailPart } from "@/components/chat/EmailPart";
 import { PropsPart } from "@/components/chat/PropsPart";
+import { Working } from "@/components/chat/Working";
 
 const TOOLS = {
   tools: {
@@ -35,9 +42,12 @@ const TOOLS = {
 
 export function Transcript({
   onScript,
+  busy,
 }: {
   /** A screenplay dropped anywhere on the thread. */
   onScript: (file: File) => void;
+  /** What is in flight, for the indicator below the last row. */
+  busy: Busy;
 }) {
   const [over, setOver] = useState(false);
 
@@ -68,6 +78,11 @@ export function Transcript({
             message.role === "user" ? <Producer /> : <Agent />
           }
         </ThreadPrimitive.Messages>
+
+        {/* Always mounted; it decides for itself whether to show, by reading
+            the runtime's `isRunning`. Gating it from out here would unmount it
+            the instant the thread stopped and kill its exit animation. */}
+        <Working busy={busy} />
       </ThreadPrimitive.Viewport>
 
       <div className="border-t px-6 py-4">
@@ -120,9 +135,9 @@ function ScriptButton({ onScript }: { onScript: (file: File) => void }) {
 function Producer() {
   return (
     <MessagePrimitive.Root className="my-3 flex justify-end">
-      <div className="max-w-[80%] rounded-lg bg-muted px-4 py-2 text-sm">
+      <Arrives className="max-w-[80%] rounded-lg bg-muted px-4 py-2 text-sm">
         <MessagePrimitive.Parts />
-      </div>
+      </Arrives>
     </MessagePrimitive.Root>
   );
 }
@@ -130,15 +145,52 @@ function Producer() {
 function Agent() {
   return (
     <MessagePrimitive.Root className="my-3 text-sm">
-      {/* Answers from `/chat` are plain text with newlines the briefing put
-          there on purpose — a list of decisions is a list, not a paragraph. */}
-      <MessagePrimitive.Parts
-        components={{
-          ...TOOLS,
-          Text: ({ text }) => <p className="whitespace-pre-wrap">{text}</p>,
-        }}
-      />
+      <Arrives>
+        {/* Answers from `/chat` are plain text with newlines the briefing put
+            there on purpose — a list of decisions is a list, not a paragraph. */}
+        <MessagePrimitive.Parts
+          components={{
+            ...TOOLS,
+            Text: ({ text }) => <p className="whitespace-pre-wrap">{text}</p>,
+          }}
+        />
+      </Arrives>
     </MessagePrimitive.Root>
+  );
+}
+
+/**
+ * A row easing in rather than appearing.
+ *
+ * The demo argument for this: most of what lands in this transcript was not
+ * typed by anybody. An email to a supplier, a reply that came back days later
+ * — they arrive from Firestore while nobody is watching, and a row that pops
+ * into existence at full opacity is indistinguishable from one that was always
+ * there. The motion is what makes "this happened just now" legible.
+ *
+ * Short and small on purpose. A long entrance on a transcript that fills
+ * itself becomes a screen that will not sit still.
+ */
+function Arrives({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const still = useReducedMotion();
+
+  if (still) return <div className={className}>{children}</div>;
+
+  return (
+    <motion.div
+      className={className}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.22, ease: "easeOut" }}
+    >
+      {children}
+    </motion.div>
   );
 }
 

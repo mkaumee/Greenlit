@@ -19,6 +19,7 @@ import { useCallback, useMemo, useState } from "react";
 
 import type { Item, Message, Negotiation, Supplier } from "@/hooks/useProject";
 import { ask, toUpload, uploadScript, type Upload } from "./api";
+import { IDLE, isBusy, type Busy } from "./busy";
 import { decisionsFor } from "./decisions";
 import { toThreadMessage } from "./convert";
 import { directionOf, inOrder, type Row } from "./rows";
@@ -49,11 +50,20 @@ export interface GreenlitThread {
   waiting: Row[];
   /** Hand a screenplay to the agent. Resolves once the props are on screen. */
   readScript: (file: File) => Promise<void>;
+  /**
+   * What is in flight, for the indicator in the transcript.
+   *
+   * Richer than the runtime's own `isRunning` on purpose: reading a screenplay
+   * and answering a question are both "running" and feel nothing alike, so the
+   * screen has to be able to say which. `isRunning` is still derived from this
+   * rather than tracked beside it, so the two cannot disagree.
+   */
+  busy: Busy;
 }
 
 export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
   const [conversation, setConversation] = useState<Row[]>([]);
-  const [running, setRunning] = useState(false);
+  const [busy, setBusy] = useState<Busy>(IDLE);
 
   const named = useCallback(
     (id: string | undefined) =>
@@ -135,7 +145,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
         ...prior,
         { kind: "producer", id: `p:${at.getTime()}`, text: question, at },
       ]);
-      setRunning(true);
+      setBusy({ kind: "asking" });
       try {
         const answer = await ask(sources.projectId, question);
         const repliedAt = new Date();
@@ -155,7 +165,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
       } finally {
         // In a finally because a thread stuck at "running" disables the
         // composer, and a producer who cannot type has no way to find out why.
-        setRunning(false);
+        setBusy(IDLE);
       }
     },
     [sources.projectId],
@@ -181,7 +191,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
           at,
         },
       ]);
-      setRunning(true);
+      setBusy({ kind: "reading", filename: file.name });
       try {
         const upload: Upload = await toUpload(file);
         const result = await uploadScript(sources.projectId, upload);
@@ -208,7 +218,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
               },
         ]);
       } finally {
-        setRunning(false);
+        setBusy(IDLE);
       }
     },
     [sources.projectId],
@@ -216,10 +226,10 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
 
   const runtime = useExternalStoreRuntime<Row>({
     messages: rows,
-    isRunning: running,
+    isRunning: isBusy(busy),
     onNew,
     convertMessage: toThreadMessage,
   });
 
-  return { runtime, waiting, readScript };
+  return { runtime, waiting, readScript, busy };
 }

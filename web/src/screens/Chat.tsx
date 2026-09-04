@@ -34,6 +34,7 @@ import { MailboxCard } from "@/components/chat/MailboxCard";
 import { NewProduction } from "@/components/chat/NewProduction";
 import { PendingProject } from "@/components/chat/context";
 import { Transcript } from "@/components/chat/Transcript";
+import { Skeleton, SkeletonRows } from "@/components/ui/skeleton";
 import type { Item, Negotiation, Supplier } from "@/hooks/useProject";
 import { useAllMessages, useMailbox } from "@/hooks/useProject";
 import { Breakdown } from "@/screens/Breakdown";
@@ -52,6 +53,7 @@ export function Chat({
   suppliers,
   supplierName,
   readError,
+  loading,
 }: {
   user: User;
   projectId: string;
@@ -63,6 +65,8 @@ export function Chat({
   supplierName: (id: string | undefined) => string;
   /** Whatever Firestore refused, if anything. Empty when all reads are fine. */
   readError: string;
+  /** True while the reads behind every panel on this screen are still open. */
+  loading: boolean;
 }) {
   const mailbox = useMailbox();
   const [panel, setPanel] = useState<Panel>("needs-you");
@@ -73,7 +77,7 @@ export function Chat({
   );
   const messages = useAllMessages(projectId, negotiationIds);
 
-  const { runtime, waiting, readScript } = useGreenlitThread({
+  const { runtime, waiting, readScript, busy } = useGreenlitThread({
     projectId,
     items,
     negotiations,
@@ -97,10 +101,11 @@ export function Chat({
             mailbox={mailbox}
             waiting={waiting}
             readError={readError}
+            loading={loading}
           />
 
           <div className="flex min-h-0 flex-col">
-            <Transcript onScript={(file) => void readScript(file)} />
+            <Transcript busy={busy} onScript={(file) => void readScript(file)} />
           </div>
 
           <aside className="flex min-h-0 flex-col overflow-hidden">
@@ -116,13 +121,18 @@ export function Chat({
                   items={items}
                   negotiations={negotiations}
                   supplierName={supplierName}
+                  loading={loading}
                 />
               )}
               {panel === "breakdown" && (
-                <Breakdown items={items} negotiations={negotiations} />
+                <Breakdown
+                  items={items}
+                  negotiations={negotiations}
+                  loading={loading}
+                />
               )}
               {panel === "savings" && (
-                <Savings items={items} negotiations={negotiations} />
+                <Savings items={items} negotiations={negotiations} loading={loading} />
               )}
             </div>
           </aside>
@@ -140,6 +150,7 @@ function Rail({
   mailbox,
   waiting,
   readError,
+  loading,
 }: {
   user: User;
   projectId: string;
@@ -148,6 +159,7 @@ function Rail({
   mailbox: ReturnType<typeof useMailbox>;
   waiting: Row[];
   readError: string;
+  loading: boolean;
 }) {
   return (
     <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
@@ -174,6 +186,10 @@ function Rail({
               </option>
             ))}
           </select>
+        ) : loading ? (
+          // "none yet" is what a producer who owns three productions saw on
+          // the way in, for as long as the query took.
+          <Skeleton className="mt-1 h-5 w-32" />
         ) : (
           <p className="mt-1 text-sm break-all">{projectId || "none yet"}</p>
         )}
@@ -206,7 +222,9 @@ function Rail({
             </span>
           )}
         </p>
-        {waiting.length === 0 ? (
+        {loading ? (
+          <SkeletonRows rows={2} className="mt-1" />
+        ) : waiting.length === 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">
             Nothing is waiting on a decision. The agent stops here every time,
             so this filling in is how you find out.
