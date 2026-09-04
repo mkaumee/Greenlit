@@ -16,20 +16,62 @@ import { useReducedMotion, motion } from "motion/react";
 
 import { cn } from "@/lib/utils";
 
-export function Skeleton({ className }: { className?: string }) {
+export function Skeleton({
+  className,
+  delay = 0,
+}: {
+  className?: string;
+  /** Offsets the sweep, so a stack of these reads as one movement. */
+  delay?: number;
+}) {
   const still = useReducedMotion();
 
   return (
-    <motion.div
+    <div
       aria-hidden
-      className={cn("rounded-md bg-muted", className)}
-      animate={still ? undefined : { opacity: [0.45, 0.9, 0.45] }}
-      transition={
-        still
-          ? undefined
-          : { duration: 1.6, repeat: Infinity, ease: "easeInOut" }
-      }
-    />
+      // `overflow-hidden` is what makes this a sweep rather than a bar sliding
+      // across the page: the highlight has to be clipped to the placeholder it
+      // belongs to.
+      //
+      // Not `bg-muted`, which is the obvious token and the wrong one here. It
+      // is oklch(0.97) against a white page and the highlight is white, which
+      // is three percent of contrast — the sweep was running correctly and was
+      // invisible, which is indistinguishable from it not running at all.
+      // `foreground/10` lands near #e9e9e9 and gives the highlight something to
+      // travel across.
+      className={cn(
+        "relative overflow-hidden rounded-md bg-foreground/10",
+        className,
+      )}
+    >
+      {!still && (
+        <motion.div
+          className="absolute inset-y-0 w-1/2"
+          style={{
+            // A literal gradient rather than Tailwind's, because v4 renamed
+            // `bg-gradient-to-r` to `bg-linear-to-r` and the old name is a
+            // compatibility alias. Writing the CSS is one line and cannot go
+            // quietly transparent on an upgrade.
+            background:
+              "linear-gradient(90deg, transparent, var(--background), transparent)",
+          }}
+          // The child is half the parent's width, and `x` is a percentage of
+          // the *child*. So -100% puts its right edge at the left edge of the
+          // placeholder, and 200% puts its left edge past the right one:
+          // fully off, travel across, fully off.
+          animate={{ x: ["-100%", "200%"] }}
+          transition={{
+            duration: 1.5,
+            repeat: Infinity,
+            ease: "linear",
+            // A beat between passes. Without it the highlight re-enters the
+            // instant it leaves, which reads as a flicker rather than a sweep.
+            repeatDelay: 0.35,
+            delay,
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -38,6 +80,9 @@ export function Skeleton({ className }: { className?: string }) {
  *
  * `aria-hidden` on each bar and one live region here, so a screen reader is
  * told "loading" once rather than read a fence of empty divs.
+ *
+ * The rows are offset from each other so the light travels down the stack
+ * instead of all of them flashing in unison.
  */
 export function SkeletonRows({
   rows = 3,
@@ -49,7 +94,7 @@ export function SkeletonRows({
   return (
     <div className={cn("space-y-2", className)} role="status" aria-label="Loading">
       {Array.from({ length: rows }, (_, i) => (
-        <Skeleton key={i} className="h-16 w-full" />
+        <Skeleton key={i} className="h-16 w-full" delay={i * 0.12} />
       ))}
     </div>
   );
