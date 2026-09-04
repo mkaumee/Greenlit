@@ -104,7 +104,7 @@ export function Decision({
 
       {outcome === null ? (
         <div className="mt-3 flex items-center gap-3">
-          <Button size="sm" disabled={busy} onClick={run}>
+          <Button size="sm" loading={busy} onClick={run}>
             {busy ? "Approving…" : "Approve"}
           </Button>
           <span className="text-xs text-muted-foreground">

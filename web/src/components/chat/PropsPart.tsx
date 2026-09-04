@@ -156,7 +156,12 @@ export function PropList({
 
       {done === "" ? (
         <div className="mt-3 flex items-center gap-3">
-          <Button size="sm" disabled={busy || kept === 0} onClick={confirm}>
+          <Button
+            size="sm"
+            loading={busy}
+            disabled={busy || kept === 0}
+            onClick={confirm}
+          >
             {busy ? "Confirming…" : `Confirm ${kept}`}
           </Button>
           <span className="text-xs text-muted-foreground">

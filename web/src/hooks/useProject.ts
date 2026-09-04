@@ -166,11 +166,22 @@ export const useSuppliers = (projectId: string) =>
  * Returns nothing while signed out rather than erroring — that is a state the
  * shell renders, not a failure.
  */
-export function useProjects(): { ids: string[]; error: string } {
-  const [state, setState] = useState<{ ids: string[]; error: string }>({
-    ids: [],
-    error: "",
-  });
+export function useProjects(): {
+  ids: string[];
+  error: string;
+  loading: boolean;
+} {
+  // Starts loading, unlike `useCollection` which is handed a project id it can
+  // check. Here there is nothing to check: until the auth observer fires there
+  // is no user, and until the first snapshot lands "no productions" and "not
+  // asked yet" are the same empty array. Telling them apart is the whole
+  // reason this flag exists — a producer who owns three productions should not
+  // be shown "none yet" on the way in.
+  const [state, setState] = useState<{
+    ids: string[];
+    error: string;
+    loading: boolean;
+  }>({ ids: [], error: "", loading: true });
 
   useEffect(() => {
     // Same leak as useMailbox had: what an auth observer returns is discarded,
@@ -185,13 +196,20 @@ export function useProjects(): { ids: string[]; error: string } {
     const stopAuth = onAuthStateChanged(auth, (user) => {
       close();
       if (user === null) {
-        setState({ ids: [], error: "" });
+        // Signed out is an answer, not a wait.
+        setState({ ids: [], error: "", loading: false });
         return;
       }
+      setState({ ids: [], error: "", loading: true });
       stopSnapshot = onSnapshot(
         query(collection(db, "projects"), where("owner_uid", "==", user.uid)),
-        (snap) => setState({ ids: snap.docs.map((d) => d.id), error: "" }),
-        (cause) => setState({ ids: [], error: cause.message }),
+        (snap) =>
+          setState({
+            ids: snap.docs.map((d) => d.id),
+            error: "",
+            loading: false,
+          }),
+        (cause) => setState({ ids: [], error: cause.message, loading: false }),
       );
     });
 

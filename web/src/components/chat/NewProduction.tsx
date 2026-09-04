@@ -51,6 +51,7 @@ export function NewProduction({ onStarted }: { onStarted: (id: string) => void }
       <Button
         size="sm"
         className="mt-2"
+        loading={busy}
         disabled={busy || title.trim() === ""}
         onClick={start}
       >

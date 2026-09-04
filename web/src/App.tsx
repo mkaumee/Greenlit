@@ -13,6 +13,7 @@ import { NavLink, Route, HashRouter as Router, Routes } from "react-router-dom";
 
 import { explain } from "@/authErrors";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
 import type { User } from "@/firebase";
 import { useItems, useNegotiations, useProjects, useSuppliers } from "@/hooks/useProject";
@@ -26,6 +27,12 @@ export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  // This did not exist, and it was a bug rather than missing polish: signing
+  // in opens a Google popup, and a button that looks unpressed gets pressed
+  // again — which opens a second popup and cancels the first with
+  // `auth/cancelled-popup-request`. The person then sees an error for having
+  // done nothing wrong.
+  const [signingIn, setSigningIn] = useState(false);
 
   useEffect(
     // Fires once with the restored session before any interaction, which is
@@ -39,7 +46,12 @@ export function App() {
   );
 
   if (!ready) {
-    return <Centred>Checking sign-in…</Centred>;
+    return (
+      <Centred>
+        <Spinner className="text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">Checking sign-in…</p>
+      </Centred>
+    );
   }
 
   if (user === null) {
@@ -51,12 +63,19 @@ export function App() {
           negotiates with sellers over days. It never buys anything — you do.
         </p>
         <Button
+          loading={signingIn}
           onClick={() => {
             setError("");
-            void signIn().catch((cause: unknown) => setError(explain(cause)));
+            setSigningIn(true);
+            void signIn()
+              .catch((cause: unknown) => setError(explain(cause)))
+              // The popup resolving does not mean this component unmounts:
+              // `onAuthStateChanged` does that, one tick later. Clearing here
+              // keeps the button live if sign-in was dismissed instead.
+              .finally(() => setSigningIn(false));
           }}
         >
-          Sign in with Google
+          {signingIn ? "Waiting for Google…" : "Sign in with Google"}
         </Button>
         {error !== "" && <p className="max-w-md text-sm text-destructive">{error}</p>}
       </Centred>
@@ -71,13 +90,29 @@ export function App() {
 }
 
 function SignedIn({ user }: { user: User }) {
-  const { ids, error: projectsError } = useProjects();
+  const {
+    ids,
+    error: projectsError,
+    loading: projectsLoading,
+  } = useProjects();
   const [chosen, setChosen] = useState("");
   const projectId = chosen !== "" && ids.includes(chosen) ? chosen : (ids[0] ?? "");
 
-  const { rows: items, error: itemsError } = useItems(projectId);
-  const { rows: negotiations, error: negotiationsError } = useNegotiations(projectId);
+  const { rows: items, error: itemsError, loading: itemsLoading } = useItems(projectId);
+  const {
+    rows: negotiations,
+    error: negotiationsError,
+    loading: negotiationsLoading,
+  } = useNegotiations(projectId);
   const { rows: suppliers, error: suppliersError } = useSuppliers(projectId);
+
+  // Every hook here already returned this and every caller threw it away, so
+  // "No items yet" was shown to a production that was still loading — the same
+  // shape of bug as the mailbox card offering Connect Gmail to an account that
+  // was already connected. One flag, because the panels below all wait on the
+  // same read: while the production list is still arriving there is not even a
+  // project id to query with.
+  const loading = projectsLoading || itemsLoading || negotiationsLoading;
 
   // These were read and discarded, so a rules refusal on any collection
   // rendered as a production with nothing in it — the same silent failure the
@@ -112,6 +147,7 @@ function SignedIn({ user }: { user: User }) {
             suppliers={suppliers}
             supplierName={supplierName}
             readError={readError}
+            loading={loading}
           />
         }
       />
@@ -127,6 +163,7 @@ function SignedIn({ user }: { user: User }) {
             negotiations={negotiations}
             supplierName={supplierName}
             waiting={waiting}
+            loading={loading}
           />
         }
       />
@@ -143,6 +180,7 @@ function Panels({
   negotiations,
   supplierName,
   waiting,
+  loading,
 }: {
   user: User;
   ids: string[];
@@ -152,6 +190,7 @@ function Panels({
   negotiations: ReturnType<typeof useNegotiations>["rows"];
   supplierName: (id: string | undefined) => string;
   waiting: number;
+  loading: boolean;
 }) {
   return (
     <div className="mx-auto max-w-5xl px-6 py-8">
@@ -200,16 +239,25 @@ function Panels({
               items={items}
               negotiations={negotiations}
               supplierName={supplierName}
+              loading={loading}
             />
           }
         />
         <Route
           path="/breakdown"
-          element={<Breakdown items={items} negotiations={negotiations} />}
+          element={
+            <Breakdown
+              items={items}
+              negotiations={negotiations}
+              loading={loading}
+            />
+          }
         />
         <Route
           path="/savings"
-          element={<Savings items={items} negotiations={negotiations} />}
+          element={
+            <Savings items={items} negotiations={negotiations} loading={loading} />
+          }
         />
         <Route path="/debug" element={<DebugPanel />} />
       </Routes>

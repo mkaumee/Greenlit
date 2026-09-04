@@ -27,6 +27,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { SkeletonRows } from "@/components/ui/skeleton";
 import type { Item, Negotiation } from "@/hooks/useProject";
 import { money, saving, simTime } from "@/lib/format";
 
@@ -37,16 +38,23 @@ export function Inbox({
   items,
   negotiations,
   supplierName,
+  loading = false,
 }: {
   projectId: string;
   items: Item[];
   negotiations: Negotiation[];
   supplierName: (id: string | undefined) => string;
+  loading?: boolean;
 }) {
   const decisions = pending(items, negotiations);
   const running = negotiations.filter(
     (n) => n.state === "SENT" || n.state === "AWAITING_REPLY",
   ).length;
+
+  // Before the empty state, because they are not the same thing and rendering
+  // one for the other is the bug this replaces: an empty production and a
+  // production still being read looked identical.
+  if (loading) return <SkeletonRows rows={4} className="mt-2" />;
 
   if (decisions.length === 0) {
     return (

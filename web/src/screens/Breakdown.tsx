@@ -17,6 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SkeletonRows } from "@/components/ui/skeleton";
 import type { Item, Negotiation } from "@/hooks/useProject";
 import { money, simTime } from "@/lib/format";
 
@@ -33,10 +34,17 @@ const TONE: Record<string, "default" | "secondary" | "outline" | "destructive"> 
 export function Breakdown({
   items,
   negotiations,
+  loading = false,
 }: {
   items: Item[];
   negotiations: Negotiation[];
+  loading?: boolean;
 }) {
+  // Before the empty state, because they are not the same thing and rendering
+  // one for the other is the bug this replaces: an empty production and a
+  // production still being read looked identical.
+  if (loading) return <SkeletonRows rows={4} className="mt-2" />;
+
   if (items.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-10 text-center">

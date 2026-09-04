@@ -17,6 +17,8 @@ import { useState } from "react";
 
 import { startConsent } from "@/chat/api";
 import { cardFor, type MailboxState } from "@/chat/mailbox";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 
 const TONES: Record<string, string> = {
   none: "border-dashed",
@@ -54,17 +56,24 @@ export function MailboxCard({ state }: { state: MailboxState }) {
 
   return (
     <div className={`rounded-lg border p-3 text-sm ${TONES[card.tone] ?? ""}`}>
-      <p className="font-medium break-all">{card.headline}</p>
+      <p className="flex items-center gap-2 font-medium break-all">
+        {/* The one state that is itself a wait. It said "Checking your
+            mailbox…" and sat there, which is the same silence this whole pass
+            is about — one card over. */}
+        {state.status === "loading" && <Spinner className="text-muted-foreground" />}
+        {card.headline}
+      </p>
       <p className="mt-1 text-xs text-muted-foreground">{card.detail}</p>
       {card.action !== "" && (
-        <button
-          type="button"
-          disabled={busy}
+        <Button
+          variant="outline"
+          size="xs"
+          className="mt-2"
+          loading={busy}
           onClick={connect}
-          className="mt-2 rounded-md border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
         >
           {busy ? "Opening Google…" : card.action}
-        </button>
+        </Button>
       )}
       {error !== "" && <p className="mt-2 text-xs text-destructive">{error}</p>}
     </div>
