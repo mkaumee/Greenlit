@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, HashRouter as Router, Routes } from "react-router-dom";
 
 import { explain } from "@/authErrors";
+import { enrolAsProducer } from "@/chat/api";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
@@ -69,6 +70,10 @@ export function App() {
             setError("");
             setSigningIn(true);
             void signIn()
+              // Being signed in is enough to be a producer here, and this is
+              // where that gets claimed. It refreshes the token itself, so the
+              // very next call carries the role — no sign out and back in.
+              .then(() => enrolAsProducer())
               .catch((cause: unknown) => setError(explain(cause)))
               // The popup resolving does not mean this component unmounts:
               // `onAuthStateChanged` does that, one tick later. Clearing here

@@ -146,6 +146,14 @@ VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
 # Firebase serves the same site on each.
 ALLOWED_ORIGINS="${CINEMA_ALLOWED_ORIGINS:-https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com}"
 
+# Whether signing in is enough to become a producer.
+#
+# On, because the alternative is running scripts/grant_producer.py once per
+# person and that does not survive a room full of judges. Set to 0 and redeploy
+# to close the deployment afterwards; the claim then comes only from that
+# script, and everyone already enrolled keeps it.
+OPEN_ENROLMENT="${OPEN_ENROLMENT:-1}"
+
 # `memory` unless explicitly asked otherwise. See the header.
 MAIL_BACKEND="${MAIL_BACKEND:-memory}"
 OAUTH_CLIENT_ID="${CINEMA_OAUTH_CLIENT_ID:-}"
@@ -613,6 +621,27 @@ else
   ok "datastore.user for $API_SA — (default) only, CONDITIONED"
 fi
 
+# Setting the producer claim, so a new account does not need a shell.
+#
+# Only this service account. The agent's is deliberately not here: enrolment
+# needs a verified Firebase ID token, which a service account never holds, and
+# the tick service serves no route that could write a claim — but the IAM
+# should say so too rather than relying on both of those staying true.
+#
+# This is the one grant in this file that hands out a permission the deployment
+# previously had nowhere at all. `POST /producers/me` only ever writes the
+# caller's own uid, which is what keeps it bounded; `CINEMA_OPEN_ENROLMENT=0`
+# closes the route without removing the binding.
+if has_role "$API_EMAIL" "roles/firebaseauth.admin"; then
+  skip "firebaseauth.admin for $API_SA"
+else
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${API_EMAIL}" \
+    --role="roles/firebaseauth.admin" \
+    --condition=None >/dev/null
+  ok "firebaseauth.admin for $API_SA — self-enrolment only, never the agent"
+fi
+
 # Writing a producer's refresh token, without being able to read one.
 #
 # Every predefined Secret Manager role that can write can also read, so the
@@ -777,7 +806,8 @@ fi
 # the tick has — but not PARALLEL_API_KEY. Only research_item searches the web,
 # and that runs on the tick; a key here would be a credential in an environment
 # that has no use for it.
-API_BRAIN_ENV="@CINEMA_BRAIN_BACKEND=${BRAIN_BACKEND}"
+API_BRAIN_ENV="@CINEMA_OPEN_ENROLMENT=${OPEN_ENROLMENT}"
+API_BRAIN_ENV="${API_BRAIN_ENV}@CINEMA_BRAIN_BACKEND=${BRAIN_BACKEND}"
 API_BRAIN_ENV="${API_BRAIN_ENV}@CINEMA_GEMINI_MODEL=${GEMINI_MODEL}"
 API_BRAIN_ENV="${API_BRAIN_ENV}@GOOGLE_GENAI_USE_VERTEXAI=true"
 API_BRAIN_ENV="${API_BRAIN_ENV}@GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"

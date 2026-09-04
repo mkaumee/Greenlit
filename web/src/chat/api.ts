@@ -272,6 +272,29 @@ export async function deleteProject(projectId: string): Promise<Done> {
   return completed(await send("DELETE", `/projects/${projectId}`));
 }
 
+/**
+ * Claim the producer role for whoever is signed in.
+ *
+ * Called once after every sign-in. It used to take a shell command and an
+ * admin to make an account usable, which does not survive a room full of
+ * judges; now being signed in is enough, on a deployment that allows it.
+ *
+ * The forced token refresh is the load-bearing half. A custom claim is baked
+ * into an ID token when it is issued, so the token in hand while this returns
+ * still does not carry it — without the refresh a newly enrolled producer
+ * would be told to sign out and back in, which is the friction being removed.
+ *
+ * Failures are deliberately quiet at the call site: a closed deployment
+ * answers 403 and the right thing is to carry on and let the next call say so
+ * properly, rather than block sign-in behind a message about a role.
+ */
+export async function enrolAsProducer(): Promise<Done> {
+  const reply = await send("POST", "/producers/me");
+  const result = await completed(reply);
+  if (result.kind === "done") await auth.currentUser?.getIdToken(true);
+  return result;
+}
+
 /** What the browser hands the API: text, or a file it has already read. */
 export interface Upload {
   filename: string;

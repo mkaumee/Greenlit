@@ -135,10 +135,37 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     [conversation, activity, waiting],
   );
 
+
+  /**
+   * Nothing can be uploaded to or asked about a production that does not
+   * exist. The controls are disabled for this, so reaching here means a code
+   * path found its way round them — say so in the thread rather than posting
+   * to `/projects//script`, which matches no route and answers with a 404 that
+   * explains nothing.
+   */
+  const noProduction = useCallback((): boolean => {
+    if (sources.projectId !== "") return false;
+    const at = new Date();
+    setConversation((prior) => [
+      ...prior,
+      {
+        kind: "briefing",
+        id: `n:${at.getTime()}`,
+        text:
+          "There is no production yet. Start one under New production, and " +
+          "then the screenplay has somewhere to go.",
+        refs: [],
+        at,
+      },
+    ]);
+    return true;
+  }, [sources.projectId]);
+
   const onNew = useCallback(
     async (message: AppendMessage) => {
       const question = textOf(message);
       if (question === "") return;
+      if (noProduction()) return;
 
       const at = new Date();
       setConversation((prior) => [
@@ -168,7 +195,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
         setBusy(IDLE);
       }
     },
-    [sources.projectId],
+    [sources.projectId, noProduction],
   );
 
   /**
@@ -181,6 +208,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
    */
   const readScript = useCallback(
     async (file: File) => {
+      if (noProduction()) return;
       const at = new Date();
       setConversation((prior) => [
         ...prior,
@@ -221,7 +249,7 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
         setBusy(IDLE);
       }
     },
-    [sources.projectId],
+    [sources.projectId, noProduction],
   );
 
   const runtime = useExternalStoreRuntime<Row>({

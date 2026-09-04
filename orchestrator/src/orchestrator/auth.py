@@ -35,7 +35,7 @@ is a line in an audit trail rather than a shrug.
 
 import logging
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import firebase_admin
 from fastapi import Depends, HTTPException, Request
@@ -49,8 +49,18 @@ log = logging.getLogger("orchestrator.auth")
 PRODUCER_ROLE = "producer"
 """The custom claim that separates a human buyer from everything else.
 
-Set out-of-band by an admin — ``scripts/grant_producer.py`` — never by anything
-the agent runs. A claim a caller could mint for itself would not be a claim.
+Set two ways. ``scripts/grant_producer.py`` grants it out of band, and with
+``open_enrolment`` on a signed-in human claims it for themselves at first
+sign-in — see :func:`enrol_producer`. That second path is a deliberate
+loosening, made because a shell command per person does not survive a room full
+of judges, and it is narrower than it sounds: enrolment writes the claim for
+*the caller's own uid*, read from a verified Firebase ID token, and there is no
+field anywhere that could name somebody else.
+
+What it is still not is the agent. The tick authenticates as a service account,
+never presents a Firebase ID token, has no route that could enrol anything, and
+holds no IAM to write a claim. And the claim was always the second line rather
+than the first: the agent has no binding on the orders database at all.
 """
 
 
@@ -142,3 +152,41 @@ def require_producer(claims: Claims) -> Producer:
         uid=str(claims.get("uid") or claims.get("sub") or ""),
         email=str(claims.get("email") or ""),
     )
+
+
+def enrol_producer(claims: dict[str, Any]) -> Producer:
+    """Give the caller the producer claim. Only ever the caller.
+
+    ``uid`` comes from the verified token and from nowhere else. The route this
+    backs takes no body at all, so there is no field a caller could use to name
+    a different person — the containment is structural rather than a check that
+    could be edited out later.
+
+    Existing claims are merged rather than replaced. Nothing else sets one
+    today, but ``set_custom_user_claims`` overwrites the whole dictionary, and
+    a future second claim silently disappearing on enrolment is the kind of bug
+    that surfaces months later as a permission nobody can explain.
+
+    Idempotent: an existing producer is returned without a write, so the panel
+    can call this on every sign-in without thinking about it.
+    """
+    uid = str(claims.get("uid") or claims.get("sub") or "")
+    email = str(claims.get("email") or "")
+    if uid == "":
+        # A verified token with no subject should be impossible. Refusing beats
+        # writing a claim onto the empty string.
+        raise HTTPException(status_code=401, detail="token carries no subject")
+
+    if claims.get("role") == PRODUCER_ROLE:
+        return Producer(uid=uid, email=email)
+
+    user = firebase_auth.get_user(uid)
+    claimed = cast(dict[str, Any] | None, user.custom_claims)
+    existing: dict[str, Any] = dict(claimed or {})
+    firebase_auth.set_custom_user_claims(uid, {**existing, "role": PRODUCER_ROLE})
+
+    # Deliberately at info rather than debug. Self-service enrolment with no
+    # line in the log is the version of this worth objecting to: this is the
+    # record of who was allowed to spend money on their own behalf, and when.
+    log.info("enrolled a producer", extra={"uid": uid, "email": email})
+    return Producer(uid=uid, email=email)

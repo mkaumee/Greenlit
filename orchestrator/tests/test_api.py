@@ -2,8 +2,11 @@
 # urllib's parse_qs is annotated to return Unknown-keyed dicts.
 # The `tokens` fixture is requested for its side effect — standing the Auth
 # emulator up before init_firebase runs — so it is deliberately unread.
+# firebase-admin ships no type information; that is about the library, not
+# this code, and conftest.py suppresses it the same way.
 # pyright: reportAny=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportMissingTypeStubs=false
 # pyright: reportUnusedParameter=false
 """The producer's browser-facing service.
 
@@ -15,10 +18,12 @@ another producer's account — or has the agent send as them.
 """
 
 import base64
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast, final
 from urllib.parse import parse_qs, urlparse
 
+import firebase_admin
 import httpx
 import pytest
 from cinema_contracts import (
@@ -34,6 +39,7 @@ from cinema_contracts import (
 )
 from cinema_contracts.testing import ScriptedBrain
 from conftest import TokenMinter
+from firebase_admin import auth as firebase_auth
 from google.cloud.firestore_v1 import AsyncClient
 from orchestrator.api import MAX_REASON, ApiServices, app, build_api_services
 from orchestrator.auth import init_firebase
@@ -1003,3 +1009,88 @@ async def test_a_stranger_cannot_rename_or_delete_a_production(
     project = await repo.get_project("someone-elses")
     assert project is not None, "still there"
     assert project.title == "Kopitiam", "and still called what its owner called it"
+
+
+# --------------------------------------------------------------------------- #
+# Enrolling yourself as a producer
+# --------------------------------------------------------------------------- #
+
+
+async def test_signing_in_is_enough_to_become_a_producer(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """The whole point: no shell command between a new account and the panel.
+
+    ``mint`` with no role gives a signed-in identity that would be refused
+    everywhere. After enrolling, a *fresh* token carries the claim — fresh
+    because custom claims are baked in at issue time, which is why the browser
+    forces a token refresh after calling this.
+    """
+    email = "newcomer@example.invalid"
+    unclaimed = {"Authorization": f"Bearer {tokens.mint(email)}"}
+
+    started = await api.post("/projects", headers=unclaimed, json={"title": "Before"})
+    assert started.status_code == 403, "not a producer yet"
+
+    enrolled = await api.post("/producers/me", headers=unclaimed)
+    assert enrolled.status_code == 200, enrolled.text
+
+    refreshed = {"Authorization": f"Bearer {tokens.sign_in(email)}"}
+    after = await api.post("/projects", headers=refreshed, json={"title": "After"})
+    assert after.status_code == 201, after.text
+
+
+async def test_enrolling_twice_is_fine(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """The panel calls this on every sign-in, so it has to be boring."""
+    headers = {"Authorization": f"Bearer {tokens.mint('twice@example.invalid')}"}
+
+    first = await api.post("/producers/me", headers=headers)
+    second = await api.post("/producers/me", headers=headers)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["uid"] == second.json()["uid"]
+
+
+async def test_enrolling_only_ever_claims_the_caller(
+    api: httpx.AsyncClient, tokens: TokenMinter
+) -> None:
+    """The containment, checked rather than asserted in a comment.
+
+    The route takes no body, so there is no field naming somebody else — this
+    test is what would fail if one were ever added.
+    """
+    assert firebase_admin._apps  # pyright: ignore[reportPrivateUsage]
+    bystander = tokens.create("bystander@example.invalid")
+    headers = {"Authorization": f"Bearer {tokens.mint('claimer@example.invalid')}"}
+
+    _ = await api.post("/producers/me", headers=headers)
+
+    assert not (firebase_auth.get_user(bystander).custom_claims or {}), (
+        "somebody who did not ask was given a role"
+    )
+
+
+async def test_a_closed_deployment_refuses_to_enrol(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """The off switch, so the deployment can be closed once judging is over.
+
+    Swaps the settings on the live services rather than the environment,
+    because `Settings` is read once at startup — which is also why turning this
+    off in production is a redeploy of the api service and not a live toggle.
+    """
+    headers = {"Authorization": f"Bearer {tokens.mint('late@example.invalid')}"}
+    closed = replace(
+        _services(firestore),
+        settings=SETTINGS.model_copy(update={"open_enrolment": False}),
+    )
+    app.state.services = closed
+    try:
+        refused = await api.post("/producers/me", headers=headers)
+    finally:
+        app.state.services = _services(firestore)
+
+    assert refused.status_code == 403
+    assert "grant_producer" in refused.text, "and says how to get in anyway"

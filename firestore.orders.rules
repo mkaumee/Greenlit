@@ -26,8 +26,15 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Producers are humans. Custom claims are set server-side by an admin;
-    // nothing a client runs can mint one for itself.
+    // Producers are humans. The claim is written server-side either way: by an
+    // admin running scripts/grant_producer.py, or — where the deployment
+    // allows it — by a producer enrolling themselves at first sign-in, which
+    // only ever writes the uid on the caller's own verified token.
+    //
+    // So a client cannot mint this directly, and the agent cannot reach it at
+    // all: it authenticates as a service account and never holds a Firebase ID
+    // token. The binding it does not have on this database is still the thing
+    // actually stopping it.
     function isProducer() {
       return isSignedIn() && request.auth.token.role == 'producer';
     }

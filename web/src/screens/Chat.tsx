@@ -118,6 +118,7 @@ export function Chat({
               // subscription per negotiation and cannot even start until the
               // negotiations themselves have arrived.
               loading={loading || messagesLoading}
+              ready={projectId !== ""}
               onScript={(file) => void readScript(file)}
             />
           </div>

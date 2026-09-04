@@ -19,8 +19,14 @@ service cloud.firestore {
     }
 
     // Producers are humans. The agent's service account never carries this
-    // claim, and nothing in the codebase can mint one for itself — custom
-    // claims are set server-side by an admin, outside anything the agent runs.
+    // claim: it holds a service account, not a Firebase ID token, so neither
+    // way of setting the claim is open to it.
+    //
+    // Both ways are server-side. An admin runs scripts/grant_producer.py, or —
+    // where the deployment allows it — a human enrols themselves at first
+    // sign-in, which writes only the uid on their own verified token. So a
+    // client still cannot mint this directly, but it is no longer true that
+    // only an admin can hand it out, and this comment used to say that.
     function isProducer() {
       return isSignedIn() && request.auth.token.role == 'producer';
     }

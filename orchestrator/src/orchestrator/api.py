@@ -56,7 +56,13 @@ from pydantic import BaseModel, Field
 
 from orchestrator import intake
 from orchestrator.app import build_brain, gemini_credentials_route
-from orchestrator.auth import Producer, init_firebase, require_producer
+from orchestrator.auth import (
+    Claims,
+    Producer,
+    enrol_producer,
+    init_firebase,
+    require_producer,
+)
 from orchestrator.briefing import summarise
 from orchestrator.clock import SimClock
 from orchestrator.digest import ProjectDigest, as_question, build_digest
@@ -475,6 +481,11 @@ class ProjectStarted(BaseModel):
     title: str
 
 
+class Enrolled(BaseModel):
+    uid: str
+    email: str
+
+
 class RenameProject(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
@@ -673,6 +684,38 @@ async def confirm_items(
         },
     )
     return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
+
+
+@app.post("/producers/me")
+async def enrol_me(request: Request, claims: Claims) -> Enrolled:
+    """Become a producer, if being signed in is enough here.
+
+    Behind `Claims` — a verified token — rather than `Signed`, which is a
+    verified token *plus* the claim this route exists to grant. A route gated on
+    its own output would never be reachable.
+
+    It takes no body. `uid` comes from the token, so there is no field a caller
+    could use to enrol somebody else, and that is a property of the signature
+    rather than a check somebody could delete.
+
+    None of this reaches the agent. It authenticates as a service account and
+    never holds a Firebase ID token, the tick service does not serve this route,
+    and its account has no IAM to write a claim. The binding that actually stops
+    the agent spending money is still the one it does not have on the orders
+    database.
+    """
+    services = services_of(request)
+    if not services.settings.open_enrolment:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "this deployment is not taking new producers. An admin grants "
+                "the role with scripts/grant_producer.py."
+            ),
+        )
+
+    producer = enrol_producer(claims)
+    return Enrolled(uid=producer.uid, email=producer.email)
 
 
 @app.patch("/projects/{project_id}")

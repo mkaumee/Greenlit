@@ -45,6 +45,7 @@ export function Transcript({
   onScript,
   busy,
   loading,
+  ready,
 }: {
   /** A screenplay dropped anywhere on the thread. */
   onScript: (file: File) => void;
@@ -52,6 +53,8 @@ export function Transcript({
   busy: Busy;
   /** True while the reads that fill this thread are still open. */
   loading: boolean;
+  /** False when there is no production yet, so nothing here can be uploaded to. */
+  ready: boolean;
 }) {
   const [over, setOver] = useState(false);
 
@@ -69,6 +72,10 @@ export function Transcript({
       onDrop={(e) => {
         e.preventDefault();
         setOver(false);
+        // With no production there is nowhere to put a screenplay, and the
+        // upload would post to `/projects//script` — an empty path segment
+        // matches no route, so the answer is a bare 404 that explains nothing.
+        if (!ready) return;
         const file = e.dataTransfer.files[0];
         if (file) onScript(file);
       }}
@@ -80,7 +87,7 @@ export function Transcript({
             written for one that has never had a script — the same
             loading-read-as-empty this pass keeps finding. */}
         <ThreadPrimitive.Empty>
-          {loading ? <Waking /> : <Empty />}
+          {loading ? <Waking /> : ready ? <Empty /> : <NoProduction />}
         </ThreadPrimitive.Empty>
         <ThreadPrimitive.Messages>
           {({ message }) =>
@@ -102,7 +109,7 @@ export function Transcript({
             placeholder="Ask what needs you, who has gone quiet, what things cost…"
             className="max-h-40 flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
-          <ScriptButton onScript={onScript} />
+          <ScriptButton onScript={onScript} disabled={!ready} />
           <ComposerPrimitive.Send className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
             Ask
           </ComposerPrimitive.Send>
@@ -112,7 +119,13 @@ export function Transcript({
   );
 }
 
-function ScriptButton({ onScript }: { onScript: (file: File) => void }) {
+function ScriptButton({
+  onScript,
+  disabled,
+}: {
+  onScript: (file: File) => void;
+  disabled: boolean;
+}) {
   const picker = useRef<HTMLInputElement>(null);
   return (
     <>
@@ -131,9 +144,14 @@ function ScriptButton({ onScript }: { onScript: (file: File) => void }) {
       />
       <button
         type="button"
+        disabled={disabled}
         onClick={() => picker.current?.click()}
-        className="rounded-md border px-3 py-2 text-sm hover:bg-accent"
-        title="Read a screenplay: text, Fountain, Final Draft or PDF"
+        className="rounded-md border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
+        title={
+          disabled
+            ? "Start a production first — there is nowhere to put a script yet"
+            : "Read a screenplay: text, Fountain, Final Draft or PDF"
+        }
       >
         Script
       </button>
@@ -218,6 +236,29 @@ function Waking() {
       </div>
       <Skeleton className="h-20 w-4/5" delay={0.12} />
       <Skeleton className="h-16 w-2/3" delay={0.24} />
+    </div>
+  );
+}
+
+/**
+ * What to say before there is anywhere to put a screenplay.
+ *
+ * The pitch below is right and was being shown too early: a producer with no
+ * production was told to press Script, and pressing it posted to
+ * `/projects//script`, which matches no route and comes back as a bare 404.
+ * The app was inviting the one action that could not work.
+ */
+function NoProduction() {
+  return (
+    <div className="mx-auto mt-16 max-w-md text-center text-sm text-muted-foreground">
+      <p className="text-base font-medium text-foreground">
+        Start a production first.
+      </p>
+      <p className="mt-2">
+        Give it a name under <span className="font-medium">New production</span>{" "}
+        on the left. Everything else — the screenplay, the props, the
+        negotiations — hangs off it.
+      </p>
     </div>
   );
 }

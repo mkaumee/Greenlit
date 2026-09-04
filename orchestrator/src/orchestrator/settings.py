@@ -201,6 +201,25 @@ class Settings(BaseSettings):
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
+    open_enrolment: bool = True
+    """Whether signing in is enough to become a producer.
+
+    On, a producer claims the role for themselves at first sign-in and the
+    panel works for anybody who can reach it. Off, the claim comes only from
+    ``scripts/grant_producer.py`` and a new account gets a 403 until somebody
+    runs it.
+
+    Defaulted on because the alternative was a shell command per person, which
+    does not survive contact with a room full of judges. It is a setting rather
+    than a constant so the deployment can be closed afterwards without a code
+    change — this is the one knob in the system that decides who may spend
+    money on their own behalf, and it should be turnable.
+
+    Either way this never reaches the agent: enrolment needs a verified Firebase
+    ID token, the tick service has no such route, and its account has no IAM to
+    write a claim.
+    """
+
     auth_emulator_host: str = ""
     """Mirrors FIREBASE_AUTH_EMULATOR_HOST, for reporting on /health.
 

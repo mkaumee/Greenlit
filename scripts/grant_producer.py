@@ -5,12 +5,32 @@
     uv run python scripts/grant_producer.py --revoke producer@example.com
     uv run python scripts/grant_producer.py --list
 
-The ``producer`` custom claim is the only thing separating a human who may
-approve a purchase from any other identity holding a valid token — including
-the agent's own service account. Nothing the agent runs can set it: custom
-claims are writable only through the Firebase Admin SDK with administrative
-credentials, which is what makes the claim mean anything at all. A permission
-a caller could grant itself is not a permission.
+The ``producer`` custom claim separates a human who may approve a purchase from
+any other identity holding a valid token — including the agent's own service
+account.
+
+This script is no longer the only way to set it. With ``CINEMA_OPEN_ENROLMENT``
+on, a signed-in human claims the role for themselves through ``POST
+/producers/me``, because a shell command per person does not survive a room
+full of judges. This docstring used to say "a permission a caller could grant
+itself is not a permission", and for humans that is now exactly what it is —
+worth saying plainly rather than leaving the old sentence standing.
+
+What that changed and what it did not:
+
+* It did **not** reach the agent. Enrolment needs a verified Firebase ID token;
+  the tick holds a service account, has no such route, and has no IAM to write
+  a claim. And the claim was always the second line — the agent has no binding
+  on the orders database at all.
+* It did **not** open anyone else's work. Enrolment writes only the caller's own
+  uid, every route is scoped by ``owner_uid``, and the orders rules still
+  require ``approved_by`` to match the caller.
+* It **did** mean anyone who can reach the panel can create productions and
+  approve their own purchases, and that ``cinema-api`` now holds Firebase Auth
+  admin permission it did not have before.
+
+This script stays because it is still how you revoke, how you list, and how a
+closed deployment lets someone in.
 
 ## Against the emulator
 
