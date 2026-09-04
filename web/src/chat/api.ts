@@ -199,7 +199,11 @@ export type ConfirmResult =
  * renders them differently, and because a thrown error inside a React event
  * handler is a blank screen.
  */
-async function post(path: string, body: unknown): Promise<Response | string> {
+async function send(
+  method: "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<Response | string> {
   const url = base();
   if (url === "") {
     return (
@@ -209,14 +213,18 @@ async function post(path: string, body: unknown): Promise<Response | string> {
   }
   try {
     return await fetch(`${url}${path}`, {
-      method: "POST",
+      method,
       headers: await authorised(),
-      body: JSON.stringify(body),
+      // A DELETE carries nothing. Sending `"undefined"` as a body is not the
+      // same as sending none, and some proxies mind.
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch (cause) {
     return describe(cause);
   }
 }
+
+const post = (path: string, body: unknown) => send("POST", path, body);
 
 export async function startProject(title: string): Promise<Started> {
   const reply = await post("/projects", { title });
@@ -226,6 +234,42 @@ export async function startProject(title: string): Promise<Started> {
   }
   const body = (await reply.json()) as { project_id: string; title: string };
   return { kind: "started", projectId: body.project_id, title: body.title };
+}
+
+export type Done = { kind: "done" } | { kind: "error"; detail: string };
+
+async function completed(reply: Response | string): Promise<Done> {
+  if (typeof reply === "string") return { kind: "error", detail: reply };
+  if (!reply.ok) return { kind: "error", detail: await detailOf(reply) };
+  return { kind: "done" };
+}
+
+/**
+ * Change what a production is called.
+ *
+ * Only the title. The id it is filed under was derived from the original name
+ * and is now in the path of every prop, supplier and email underneath it, so
+ * it stays — a production is allowed to be called one thing and stored as
+ * another.
+ */
+export async function renameProject(
+  projectId: string,
+  title: string,
+): Promise<Done> {
+  return completed(await send("PATCH", `/projects/${projectId}`, { title }));
+}
+
+/**
+ * Remove a production, its props, its negotiations and its correspondence.
+ *
+ * Not reversible, and not partial: the service walks the subcollections,
+ * because the tick finds work through queries that never look at which
+ * productions exist. Purchase orders are the exception and stay — they live in
+ * a database this cannot reach, and an approved order outliving the production
+ * it belonged to is the correct way round.
+ */
+export async function deleteProject(projectId: string): Promise<Done> {
+  return completed(await send("DELETE", `/projects/${projectId}`));
 }
 
 /** What the browser hands the API: text, or a file it has already read. */

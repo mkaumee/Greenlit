@@ -166,7 +166,16 @@ export const useSuppliers = (projectId: string) =>
  * Returns nothing while signed out rather than erroring — that is a state the
  * shell renders, not a failure.
  */
+/** One production, as the rail lists it. */
+export interface ProjectRow {
+  id: string;
+  /** What the producer calls it. Empty on productions made before titles were
+   * shown, which is why every caller falls back to the id. */
+  title: string;
+}
+
 export function useProjects(): {
+  rows: ProjectRow[];
   ids: string[];
   error: string;
   loading: boolean;
@@ -178,10 +187,10 @@ export function useProjects(): {
   // reason this flag exists — a producer who owns three productions should not
   // be shown "none yet" on the way in.
   const [state, setState] = useState<{
-    ids: string[];
+    rows: ProjectRow[];
     error: string;
     loading: boolean;
-  }>({ ids: [], error: "", loading: true });
+  }>({ rows: [], error: "", loading: true });
 
   useEffect(() => {
     // Same leak as useMailbox had: what an auth observer returns is discarded,
@@ -197,19 +206,22 @@ export function useProjects(): {
       close();
       if (user === null) {
         // Signed out is an answer, not a wait.
-        setState({ ids: [], error: "", loading: false });
+        setState({ rows: [], error: "", loading: false });
         return;
       }
-      setState({ ids: [], error: "", loading: true });
+      setState({ rows: [], error: "", loading: true });
       stopSnapshot = onSnapshot(
         query(collection(db, "projects"), where("owner_uid", "==", user.uid)),
         (snap) =>
           setState({
-            ids: snap.docs.map((d) => d.id),
+            rows: snap.docs.map((d) => ({
+              id: d.id,
+              title: String((d.data() as { title?: string }).title ?? ""),
+            })),
             error: "",
             loading: false,
           }),
-        (cause) => setState({ ids: [], error: cause.message, loading: false }),
+        (cause) => setState({ rows: [], error: cause.message, loading: false }),
       );
     });
 
@@ -219,7 +231,10 @@ export function useProjects(): {
     };
   }, []);
 
-  return state;
+  // `ids` alongside `rows` because most callers only ever need to know which
+  // production is selected, and threading a pair of arrays through them all to
+  // save one `map` would be the tail wagging the dog.
+  return { ...state, ids: state.rows.map((r) => r.id) };
 }
 
 /**

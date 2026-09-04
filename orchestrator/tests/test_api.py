@@ -940,3 +940,66 @@ async def test_an_empty_briefing_says_it_was_empty(
 
     assert body["source"] == "stored-facts"
     assert "empty" in body["fallback_reason"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# Renaming and deleting
+# --------------------------------------------------------------------------- #
+
+
+async def test_renaming_changes_the_title_only(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    headers = _auth(tokens)
+    project_id = await _start(api, headers, title="Nihgtfall")
+
+    reply = await api.patch(
+        f"/projects/{project_id}", headers=headers, json={"title": "Nightfall"}
+    )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["project_id"] == project_id, "the id it is filed under stays"
+    project = await FirestoreRepository(firestore).get_project(project_id)
+    assert project is not None
+    assert project.title == "Nightfall"
+
+
+async def test_deleting_removes_the_production_and_its_work(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Through the route, so the ownership check and the recursion are both in
+    the path a browser actually takes."""
+    headers = _auth(tokens)
+    project_id = await _start(api, headers)
+    _ = await api.post(
+        f"/projects/{project_id}/script", headers=headers, json=_script_body()
+    )
+    repo = FirestoreRepository(firestore)
+    assert await repo.list_items(project_id) != {}
+
+    reply = await api.delete(f"/projects/{project_id}", headers=headers)
+
+    assert reply.status_code == 200, reply.text
+    assert await repo.get_project(project_id) is None
+    assert await repo.list_items(project_id) == {}
+
+
+async def test_a_stranger_cannot_rename_or_delete_a_production(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Same boundary as every other route here. The admin SDK bypasses
+    firestore.rules, so `_owned` is the only thing standing between a
+    signed-in stranger and somebody else's production — and these two are the
+    routes where getting that wrong is unrecoverable."""
+    repo = await _owned_project(firestore, "someone-elses", "a-different-producer")
+    headers = _auth(tokens, "outsider@example.invalid")
+
+    renamed = await api.patch(
+        "/projects/someone-elses", headers=headers, json={"title": "Mine Now"}
+    )
+    deleted = await api.delete("/projects/someone-elses", headers=headers)
+
+    assert renamed.status_code == deleted.status_code == 404
+    project = await repo.get_project("someone-elses")
+    assert project is not None, "still there"
+    assert project.title == "Kopitiam", "and still called what its owner called it"

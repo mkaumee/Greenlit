@@ -475,6 +475,19 @@ class ProjectStarted(BaseModel):
     title: str
 
 
+class RenameProject(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class ProjectRenamed(BaseModel):
+    project_id: str
+    title: str
+
+
+class ProjectDeleted(BaseModel):
+    project_id: str
+
+
 class UploadScript(BaseModel):
     """Either text, or a file. Not both, and not neither.
 
@@ -660,6 +673,55 @@ async def confirm_items(
         },
     )
     return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
+
+
+@app.patch("/projects/{project_id}")
+async def rename_project(
+    request: Request, project_id: str, body: RenameProject, producer: Signed
+) -> ProjectRenamed:
+    """Change what a production is called.
+
+    Only the title. The id was derived from the original title and is now in
+    the path of everything underneath, so it stays whatever it was — a
+    production called one thing and filed under another is fine, and rewriting
+    those paths to chase a retyped name is how correspondence goes missing.
+    """
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    await services.repo.rename_project(project_id, body.title)
+    log.info(
+        "project renamed",
+        extra={"project_id": project_id, "uid": producer.uid},
+    )
+    return ProjectRenamed(project_id=project_id, title=body.title)
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project(
+    request: Request, project_id: str, producer: Signed
+) -> ProjectDeleted:
+    """Remove a production and everything underneath it.
+
+    Everything underneath is not a flourish. The tick finds work through
+    collection-group queries on ``next_action_due_at``, which do not consult
+    the list of projects at all, so a production whose document alone was
+    deleted goes on emailing suppliers out of orphaned rows nobody can see.
+
+    Purchase orders are not touched and cannot be: they live in another
+    database this service has no binding on, and nothing may delete one. An
+    approved order outlives the production it was approved for, which is the
+    correct way round — money left the building.
+    """
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    await services.repo.delete_project(project_id)
+    log.info(
+        "project deleted",
+        extra={"project_id": project_id, "uid": producer.uid},
+    )
+    return ProjectDeleted(project_id=project_id)
 
 
 def _source_for(body: UploadScript) -> ScriptSource:

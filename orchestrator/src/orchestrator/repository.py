@@ -225,6 +225,49 @@ class FirestoreRepository:
         data = snapshot.to_dict()
         return None if data is None else ProjectRecord.model_validate(data)
 
+    async def rename_project(self, project_id: str, title: str) -> None:
+        """Change what a production is called. Not what it is filed under.
+
+        The document id stays. It is in the path of every item, supplier,
+        negotiation and message underneath, and it is stored inside every
+        purchase order — so following a retyped title would mean rewriting all
+        of that, and losing whatever the rewrite missed. A production is
+        allowed to be called one thing and filed under another; that is what a
+        title is for.
+        """
+        _ = await self._project_ref(project_id).update({"title": title})
+
+    async def delete_project(self, project_id: str) -> None:
+        """Remove a production and everything underneath it.
+
+        The subcollections are the point. Firestore does not delete children
+        with their parent, and ``due_items`` and ``due_negotiations`` are
+        *collection-group* queries — they find work by ``next_action_due_at``
+        across the whole database, with no reference to which projects exist.
+        Delete only the document and the tick stops ticking this production by
+        name while its orphaned rows keep coming back through those queries, so
+        the agent goes on emailing suppliers for a production its owner watched
+        disappear.
+
+        Deepest first, and the document last, so a run killed halfway has
+        removed a suffix of the work rather than stranded it: the project is
+        still listed, still owned, still visible, and running this again
+        finishes the job. Doing it the other way round would orphan whatever
+        was left with no way to find it from the panel.
+        """
+        project = self._project_ref(project_id)
+
+        async for negotiation in project.collection(NEGOTIATIONS).list_documents():
+            async for message in negotiation.collection(MESSAGES).list_documents():
+                _ = await message.delete()
+            _ = await negotiation.delete()
+
+        for collection in (ITEMS, SUPPLIERS):
+            async for document in project.collection(collection).list_documents():
+                _ = await document.delete()
+
+        _ = await project.delete()
+
     # ------------------------------------------------------------------ #
     # Mailboxes
     # ------------------------------------------------------------------ #

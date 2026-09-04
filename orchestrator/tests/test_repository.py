@@ -571,3 +571,108 @@ async def test_marking_a_mailbox_expired_keeps_the_address(
 async def test_an_unconnected_producer_has_no_mailbox(firestore: AsyncClient) -> None:
     repo = FirestoreRepository(firestore)
     assert await repo.get_mailbox("never-connected") is None
+
+
+# --------------------------------------------------------------------------- #
+# Renaming and deleting a production
+# --------------------------------------------------------------------------- #
+
+
+async def test_renaming_changes_the_title_and_not_the_id(
+    firestore: AsyncClient,
+) -> None:
+    """The id is in the path of everything underneath, so it has to survive.
+
+    A production is allowed to be called one thing and filed under another. The
+    alternative — moving every item, supplier, negotiation and message to a new
+    path because somebody fixed a typo — is how correspondence goes missing.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_item(PID, "mirror", ItemRecord(name="Mirror", category="prop"))
+
+    await repo.rename_project(PID, "Kopitiam Nights")
+
+    project = await repo.get_project(PID)
+    assert project is not None
+    assert project.title == "Kopitiam Nights"
+    assert await repo.get_item(PID, "mirror") is not None
+
+
+async def test_deleting_takes_the_subcollections_with_it(
+    firestore: AsyncClient,
+) -> None:
+    """The assertion that matters, and the reason this method walks children.
+
+    Firestore does not delete a document's subcollections with it, and the tick
+    finds work through *collection-group* queries on ``next_action_due_at`` —
+    which never consult the list of projects. A delete that removed only the
+    project document would leave items and negotiations that no screen can show
+    and every tick still picks up, so the agent would go on emailing suppliers
+    about a production its owner watched disappear.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.save_item(
+        PID,
+        "mirror",
+        ItemRecord(
+            name="Mirror",
+            category="prop",
+            status=ItemStatus.RESEARCHING,
+            next_action_due_at=T0 - timedelta(hours=1),
+        ),
+    )
+    await repo.save_supplier(
+        PID, "sup1", SupplierRecord(name="Ah Seng Rentals", email="s@example.invalid")
+    )
+    await repo.save_negotiation(PID, "neg1", _negotiation(due=T0 - timedelta(hours=1)))
+    _ = await repo.append_message(
+        PID,
+        "neg1",
+        "m1",
+        MessageRecord(direction="OUTBOUND", body="hello", sim_sent_at=T0),
+    )
+
+    await repo.delete_project(PID)
+
+    assert await repo.get_project(PID) is None
+    assert await repo.list_items(PID) == {}
+    assert await repo.list_suppliers(PID) == {}
+    assert await repo.list_negotiations(PID) == {}
+    assert await repo.list_messages(PID, "neg1") == []
+
+    # The half that a plain document delete would have left running.
+    assert await repo.due_items(T0) == []
+    assert await repo.due_negotiations(T0) == []
+
+
+async def test_deleting_one_production_leaves_the_others_alone(
+    firestore: AsyncClient,
+) -> None:
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+    await repo.create_project("proj2", _project())
+    await repo.save_item(PID, "mirror", ItemRecord(name="Mirror", category="prop"))
+    await repo.save_item("proj2", "lamp", ItemRecord(name="Lamp", category="prop"))
+
+    await repo.delete_project(PID)
+
+    assert await repo.get_project("proj2") is not None
+    assert set(await repo.list_items("proj2")) == {"lamp"}
+
+
+async def test_deleting_again_is_not_an_error(firestore: AsyncClient) -> None:
+    """Because a killed run has to be safe to repeat.
+
+    The delete goes deepest-first and takes the document last, so a run that
+    stopped halfway leaves the production listed and still owned — visible, and
+    finishable by pressing Delete again.
+    """
+    repo = FirestoreRepository(firestore)
+    await repo.create_project(PID, _project())
+
+    await repo.delete_project(PID)
+    await repo.delete_project(PID)
+
+    assert await repo.get_project(PID) is None

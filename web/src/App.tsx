@@ -17,6 +17,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { auth, signIn, signOutOfEverything, USE_EMULATOR } from "@/firebase";
 import type { User } from "@/firebase";
 import { useItems, useNegotiations, useProjects, useSuppliers } from "@/hooks/useProject";
+import type { ProjectRow } from "@/hooks/useProject";
 import { Breakdown } from "@/screens/Breakdown";
 import { Chat } from "@/screens/Chat";
 import { DebugPanel } from "@/screens/DebugPanel";
@@ -91,6 +92,7 @@ export function App() {
 
 function SignedIn({ user }: { user: User }) {
   const {
+    rows: projects,
     ids,
     error: projectsError,
     loading: projectsLoading,
@@ -140,7 +142,7 @@ function SignedIn({ user }: { user: User }) {
           <Chat
             user={user}
             projectId={projectId}
-            projectIds={ids}
+            projects={projects}
             onPickProject={setChosen}
             items={items}
             negotiations={negotiations}
@@ -156,7 +158,7 @@ function SignedIn({ user }: { user: User }) {
         element={
           <Panels
             user={user}
-            ids={ids}
+            projects={projects}
             projectId={projectId}
             setChosen={setChosen}
             items={items}
@@ -173,7 +175,7 @@ function SignedIn({ user }: { user: User }) {
 
 function Panels({
   user,
-  ids,
+  projects,
   projectId,
   setChosen,
   items,
@@ -183,7 +185,7 @@ function Panels({
   loading,
 }: {
   user: User;
-  ids: string[];
+  projects: ProjectRow[];
   projectId: string;
   setChosen: (id: string) => void;
   items: ReturnType<typeof useItems>["rows"];
@@ -202,15 +204,15 @@ function Panels({
           )}
         </div>
         <div className="flex items-center gap-3 text-sm">
-          {ids.length > 1 && (
+          {projects.length > 1 && (
             <select
               className="rounded-md border bg-background px-2 py-1"
               onChange={(e) => setChosen(e.target.value)}
               value={projectId}
             >
-              {ids.map((id) => (
-                <option key={id} value={id}>
-                  {id}
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title || p.id}
                 </option>
               ))}
             </select>
