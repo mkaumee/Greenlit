@@ -20,11 +20,11 @@ put a price on, and three things in it are deliberately *not*:
 to *exist*, not what the prose happens to mention. Those three lines are how you
 find out whether it does.
 
-## The measured baseline
+## Where it started
 
-Not a guess — this is what the deployed brain actually returned on
-2026-09-03, before the breakdown scope was widened. Keep it here so the next
-change to `breakdown/parser.py` has something to be compared against.
+Not a guess — this is what the deployed brain actually returned on 2026-09-03,
+when it was asked only for props. Kept because the shape of what it missed is
+the argument for the change that followed.
 
 **13 found:** brass kerosene lamp (counter), glasses of teh tarik, wooden
 birdcage, leather ledger, fountain pen, enamel plates, sacks of coffee beans,
@@ -51,18 +51,34 @@ What was wrong with it:
 - **The cigarette came back consumable** while the line it quoted says *"a
   cigarette he does not light"* — a flag contradicting its own evidence.
 
-## What should happen now
+## The current baseline
 
-The instruction in `main-agent/src/main_agent/breakdown/parser.py` was widened
-to ask for everything a production must source: set dressing, scenic elements
-and costume alongside hand props. So on a re-run:
+Then `breakdown/parser.py` was widened to ask for everything a production must
+source — set dressing, scenic elements and costume alongside hand props — and
+the same screenplay came back with **20**, measured 2026-09-04. This is the
+list to compare the next change against.
 
-- the tables, the chairs and the signboard **appear**, with a category saying
-  which they are;
-- the watch, the rain and the motorcycle **still do not**;
-- the cigarette is **no longer** flagged consumable, while the thrown glass and
-  the shattered mirror still are;
-- the glasses come back with **qty 4** — the script says four.
+**Added by the widening:** ceiling fans, marble-topped tables, mismatched
+rattan chairs, the faded batik shirt, the awning, the shutters, and the
+hand-painted signboard.
+
+**Still right:** all three traps avoided, no hallucinations, the twin lamps
+still split, and the "same four cups" in Razak's dialogue on line 19 still
+refused — it is a line about the glasses, not a fifth object.
+
+**Fixed:** the cigarette is no longer flagged destroyed on camera, while the
+thrown glass and the shattered mirror still are. And the glasses come back as
+**qty 4**, from *"four glasses of teh tarik"* — the model takes a count the
+script states rather than defaulting to one.
+
+Two physical things in the script are still not on the list, and that is a
+decision rather than a defect: the **counter** (lines 9, 31, 64, 68) and the
+**shelves** (lines 41, 44). Both come with a real kopitiam location.
+
+The birdcage comes back as *"Wooden Birdcage With Merbok"*, bundling a live
+zebra dove into a props line item. Left alone on purpose: the confirm gate is
+where a producer edits the list, and nothing is researched or emailed until
+they press it.
 
 A consumable item needs one per take, which is why the final quantity is yours
 to set at confirmation and not the agent's.
