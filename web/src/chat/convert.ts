@@ -36,6 +36,7 @@ export const EMAIL_TOOL = "email";
 export const DECISION_TOOL = "approve_purchase";
 export const PROPS_TOOL = "read_script";
 export const OPENINGS_TOOL = "draft_openings";
+export const RESEARCH_TOOL = "research_items";
 
 /**
  * A briefing, plus the note saying who wrote it.
@@ -117,6 +118,30 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
             result: { count: row.props.length },
           },
         ],
+        createdAt: row.at,
+      };
+
+    case "research":
+      // The one part in here that carries a real `status`. assistant-ui gives
+      // tool-call parts a ToolCallMessagePartStatus and hands it to the
+      // renderer, which is the library's own way of saying "this is still
+      // going" — better than a bespoke boolean the component would have to be
+      // told about separately.
+      return {
+        id: row.id,
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: row.id,
+            toolName: RESEARCH_TOOL,
+            args: { items: row.items },
+            ...(row.running
+              ? {}
+              : { result: { items: row.items.length } }),
+          },
+        ],
+        status: row.running ? { type: "running" } : { type: "complete", reason: "stop" },
         createdAt: row.at,
       };
 

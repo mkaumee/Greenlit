@@ -69,6 +69,9 @@ export interface Item {
   scenes?: string[];
   mentions?: SceneMention[];
   reference_band?: ReferenceBand;
+  /** Sellers research found for this item. Written with the item, after the
+   * supplier documents themselves. */
+  supplier_ids?: string[];
   status?: string;
   floor_price?: Money;
   chosen_quote?: Quote;

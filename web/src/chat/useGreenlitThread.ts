@@ -21,6 +21,7 @@ import type { Item, Message, Negotiation, Supplier } from "@/hooks/useProject";
 import { ask, toUpload, uploadScript, type Upload } from "./api";
 import { IDLE, isBusy, type Busy } from "./busy";
 import { decisionsFor } from "./decisions";
+import { researchOf, stillWorking } from "./research";
 import { toThreadMessage } from "./convert";
 import { directionOf, inOrder, type Row } from "./rows";
 
@@ -177,9 +178,34 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     ];
   }, [sources.negotiations, named, itemNamed]);
 
+  /**
+   * The agent working, between confirmation and the first drafts.
+   *
+   * Dated by the oldest item still in flight so it sits where the work started
+   * rather than jumping to the bottom on every snapshot — this row updates
+   * several times a minute while a tick runs, and a card that keeps relocating
+   * is harder to read than one that stays put and fills in.
+   */
+  const research = useMemo<Row[]>(() => {
+    const items = researchOf(sources.items, sources.suppliers, sources.negotiations);
+    if (items.length === 0) return [];
+    return [
+      {
+        kind: "research" as const,
+        id: "research",
+        items,
+        running: stillWorking(items),
+        at: sources.items
+          .map((i) => i.next_action_due_at?.toDate())
+          .filter((d): d is Date => d !== undefined)
+          .sort((a, b) => a.getTime() - b.getTime())[0] ?? new Date(),
+      },
+    ];
+  }, [sources.items, sources.suppliers, sources.negotiations]);
+
   const rows = useMemo(
-    () => inOrder([...conversation, ...activity, ...waiting, ...openings]),
-    [conversation, activity, waiting, openings],
+    () => inOrder([...conversation, ...activity, ...waiting, ...openings, ...research]),
+    [conversation, activity, waiting, openings, research],
   );
 
 

@@ -29,11 +29,13 @@ import {
   EMAIL_TOOL,
   OPENINGS_TOOL,
   PROPS_TOOL,
+  RESEARCH_TOOL,
 } from "@/chat/convert";
 import { DecisionPart } from "@/components/chat/DecisionPart";
 import { EmailPart } from "@/components/chat/EmailPart";
 import { OpeningsPart } from "@/components/chat/OpeningsPart";
 import { PropsPart } from "@/components/chat/PropsPart";
+import { ResearchPart } from "@/components/chat/ResearchPart";
 import { Working } from "@/components/chat/Working";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -44,6 +46,7 @@ const TOOLS = {
       [DECISION_TOOL]: DecisionPart,
       [PROPS_TOOL]: PropsPart,
       [OPENINGS_TOOL]: OpeningsPart,
+      [RESEARCH_TOOL]: ResearchPart,
     },
   },
 } as const;

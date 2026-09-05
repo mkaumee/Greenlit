@@ -15,6 +15,7 @@
  */
 
 import type { Prop } from "./api";
+import type { ResearchItem } from "./research";
 
 /** Something an answer pointed at, that the panel renders as a link. */
 export interface Reference {
@@ -156,13 +157,29 @@ export interface OpeningsRow {
   at: Date;
 }
 
+/**
+ * The agent working, between confirmation and the first drafts.
+ *
+ * One row for the whole production rather than one per prop: they are worked
+ * on together across the same ticks, and a separate card per item would push
+ * everything else out of the transcript.
+ */
+export interface ResearchRow {
+  kind: "research";
+  id: string;
+  items: ResearchItem[];
+  running: boolean;
+  at: Date;
+}
+
 export type Row =
   | ProducerRow
   | BriefingRow
   | ActivityRow
   | DecisionRow
   | PropsRow
-  | OpeningsRow;
+  | OpeningsRow
+  | ResearchRow;
 
 /**
  * Oldest first, by when each thing actually happened.
