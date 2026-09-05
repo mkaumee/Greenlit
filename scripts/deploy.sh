@@ -274,10 +274,20 @@ case "$MAIL_BACKEND" in
     ;;
   gmail)
     problems=()
+
+    # Two ways a mailbox can exist, and this used to know about only one.
+    #
+    # `$TOKEN_SECRET` is the single agent mailbox that oauth_bootstrap.py fills.
+    # Since per-producer mailboxes landed, a producer connecting Gmail from the
+    # panel writes `$TOKEN_SECRET-<uid>` instead — so a deployment with a
+    # perfectly good mailbox was refused here and pointed at a bootstrap script
+    # it did not need. Either shape counts.
     versions=$(gcloud secrets versions list "$TOKEN_SECRET" \
       --filter='state:ENABLED' --format='value(name)' 2>/dev/null | wc -l | tr -d ' ')
-    [[ "$versions" -gt 0 ]] \
-      || problems+=("secret '$TOKEN_SECRET' has no enabled version — the refresh token has not been bootstrapped into it")
+    producers=$(gcloud secrets list --format='value(name)' 2>/dev/null \
+      | grep -c "^${TOKEN_SECRET}-" || true)
+    [[ "$versions" -gt 0 || "$producers" -gt 0 ]] \
+      || problems+=("no mailbox: '$TOKEN_SECRET' has no enabled version and no producer has connected Gmail from the panel")
     [[ -n "$OAUTH_CLIENT_ID" ]] \
       || problems+=("CINEMA_OAUTH_CLIENT_ID is not set — token refresh fails with invalid_client")
     [[ -n "$OAUTH_CLIENT_SECRET" ]] \
@@ -294,7 +304,8 @@ case "$MAIL_BACKEND" in
 
     PROJECT_ID=$PROJECT_ID $0
 
-  or finish the Gmail side first (docs/oauth-runbook.md):
+  or connect a mailbox first — either a producer pressing Connect Gmail in
+  the panel, or the single agent mailbox (docs/oauth-runbook.md):
 
     CINEMA_TOKEN_BACKEND=secret-manager CINEMA_GCP_PROJECT=$PROJECT_ID \\
       uv run python scripts/oauth_bootstrap.py
@@ -303,7 +314,7 @@ case "$MAIL_BACKEND" in
 EOF
       exit 5
     fi
-    ok "refresh token present ($versions version(s)) and OAuth client configured"
+    ok "mailbox present (agent: $versions version(s), producers: $producers) and OAuth client configured"
     printf '  \033[33m!\033[0m this deploy WILL email real sellers once it ticks\n'
     ;;
   *)
