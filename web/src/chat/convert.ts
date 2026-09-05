@@ -35,6 +35,7 @@ import type { Row } from "./rows";
 export const EMAIL_TOOL = "email";
 export const DECISION_TOOL = "approve_purchase";
 export const PROPS_TOOL = "read_script";
+export const OPENINGS_TOOL = "draft_openings";
 
 /**
  * A briefing, plus the note saying who wrote it.
@@ -114,6 +115,26 @@ export function toThreadMessage(row: Row): ThreadMessageLike {
             toolName: PROPS_TOOL,
             args: { props: row.props, filename: row.filename },
             result: { count: row.props.length },
+          },
+        ],
+        createdAt: row.at,
+      };
+
+    case "openings":
+      // Like `props`, and for the same reason: the writing has happened, the
+      // sending has not. Deliberately not an `approval` — that primitive is
+      // one decision, and this is a batch a producer reads and releases
+      // together.
+      return {
+        id: row.id,
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: row.id,
+            toolName: OPENINGS_TOOL,
+            args: { openings: row.openings },
+            result: { count: row.openings.length },
           },
         ],
         createdAt: row.at,

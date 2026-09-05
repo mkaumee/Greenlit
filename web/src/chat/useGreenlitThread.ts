@@ -48,6 +48,8 @@ export interface GreenlitThread {
   runtime: AssistantRuntime;
   /** Decisions waiting on a person. The rail reads this; it never scrolls. */
   waiting: Row[];
+  /** Opening emails written and not yet released. Also waiting on a person. */
+  openings: Row[];
   /** Hand a screenplay to the agent. Resolves once the props are on screen. */
   readScript: (file: File) => Promise<void>;
   /**
@@ -130,9 +132,54 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     [sources.items, sources.negotiations, named],
   );
 
+  /**
+   * Opening emails written and not yet released.
+   *
+   * Derived from Firestore rather than pushed in like the props are, because
+   * they appear on their own a tick or two after confirmation — nobody is
+   * watching when the research finishes, and the screen filling itself is the
+   * thing this product claims.
+   *
+   * One row for the batch, dated by the oldest, so it sorts into the
+   * transcript where the drafting happened rather than jumping to the bottom
+   * every time another one lands.
+   */
+  const openings = useMemo<Row[]>(() => {
+    const pending = sources.negotiations
+      .filter(
+        (n) =>
+          n.state === "DRAFTED" &&
+          (n.draft_body ?? "") !== "" &&
+          n.opening_released_at == null,
+      )
+      .map((n) => ({
+        negotiationId: n.id,
+        supplier: named(n.supplier_id),
+        itemName: itemNamed(n.item_id),
+        subject: n.draft_subject ?? "",
+        body: n.draft_body ?? "",
+      }));
+    if (pending.length === 0) return [];
+
+    const at = sources.negotiations
+      .filter((n) => pending.some((p) => p.negotiationId === n.id))
+      .map((n) => n.updated_at?.toDate())
+      .filter((d): d is Date => d !== undefined)
+      .sort((a, b) => a.getTime() - b.getTime())[0];
+
+    return [
+      {
+        kind: "openings" as const,
+        id: "openings",
+        openings: pending,
+        at: at ?? new Date(),
+      },
+    ];
+  }, [sources.negotiations, named, itemNamed]);
+
   const rows = useMemo(
-    () => inOrder([...conversation, ...activity, ...waiting]),
-    [conversation, activity, waiting],
+    () => inOrder([...conversation, ...activity, ...waiting, ...openings]),
+    [conversation, activity, waiting, openings],
   );
 
 
@@ -259,5 +306,5 @@ export function useGreenlitThread(sources: ThreadSources): GreenlitThread {
     convertMessage: toThreadMessage,
   });
 
-  return { runtime, waiting, readScript, busy };
+  return { runtime, waiting, openings, readScript, busy };
 }

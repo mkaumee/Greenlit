@@ -24,9 +24,15 @@ import { useReducedMotion, motion } from "motion/react";
 import { useRef, useState } from "react";
 
 import type { Busy } from "@/chat/busy";
-import { DECISION_TOOL, EMAIL_TOOL, PROPS_TOOL } from "@/chat/convert";
+import {
+  DECISION_TOOL,
+  EMAIL_TOOL,
+  OPENINGS_TOOL,
+  PROPS_TOOL,
+} from "@/chat/convert";
 import { DecisionPart } from "@/components/chat/DecisionPart";
 import { EmailPart } from "@/components/chat/EmailPart";
+import { OpeningsPart } from "@/components/chat/OpeningsPart";
 import { PropsPart } from "@/components/chat/PropsPart";
 import { Working } from "@/components/chat/Working";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -37,6 +43,7 @@ const TOOLS = {
       [EMAIL_TOOL]: EmailPart,
       [DECISION_TOOL]: DecisionPart,
       [PROPS_TOOL]: PropsPart,
+      [OPENINGS_TOOL]: OpeningsPart,
     },
   },
 } as const;

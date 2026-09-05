@@ -249,9 +249,23 @@ async def test_a_screenplay_becomes_negotiations_without_anything_hand_seeded(
     assert all(i.status is ItemStatus.NEGOTIATING for i in items.values())
     assert all(i.reference_band is not None for i in items.values())
 
-    # And the loop took over: opening emails went out.
-    states = {n.state for n in negotiations.values()}
-    assert states == {NegotiationState.AWAITING_REPLY}
+    # And the loop took over as far as it is allowed to on its own: the opening
+    # emails are written and waiting, not sent. This is the gate — the whole
+    # path from a screenplay to a stranger's inbox stops here for a person.
+    assert {n.state for n in negotiations.values()} == {NegotiationState.DRAFTED}
+    assert all(n.draft_body for n in negotiations.values()), "written"
+    assert all(n.opening_released_at is None for n in negotiations.values()), "not sent"
+
+    # A producer reads them and releases them, and only then do they go.
+    released_at = await repo.read(PID)
+    for negotiation_id, record in negotiations.items():
+        record.opening_released_at = released_at.sim_now
+        record.next_action_due_at = released_at.sim_now
+        await repo.save_negotiation(PID, negotiation_id, record)
+    _ = await api.post("/tick")
+
+    after = await repo.list_negotiations(PID)
+    assert {n.state for n in after.values()} == {NegotiationState.AWAITING_REPLY}
 
 
 async def test_the_floor_set_at_confirmation_reaches_every_negotiation(

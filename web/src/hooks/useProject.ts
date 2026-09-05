@@ -90,6 +90,12 @@ export interface Negotiation {
   last_outbound_at?: Timestamp;
   escalation_reason?: string;
   latest_reasoning?: string;
+
+  draft_subject?: string;
+  draft_body?: string;
+  /** Unset while the opening email is still waiting to be read and released. */
+  opening_released_at?: Timestamp;
+  updated_at?: Timestamp;
 }
 
 export interface Supplier {

@@ -82,7 +82,7 @@ export function Chat({
     negotiationIds,
   );
 
-  const { runtime, waiting, readScript, busy } = useGreenlitThread({
+  const { runtime, waiting, openings, readScript, busy } = useGreenlitThread({
     projectId,
     items,
     negotiations,
@@ -106,6 +106,7 @@ export function Chat({
             negotiations={negotiations}
             mailbox={mailbox}
             waiting={waiting}
+            openings={openings}
             readError={readError}
             loading={loading}
           />
@@ -164,6 +165,7 @@ function Rail({
   onPickProject,
   mailbox,
   waiting,
+  openings,
   readError,
   loading,
   negotiations,
@@ -174,6 +176,7 @@ function Rail({
   onPickProject: (id: string) => void;
   mailbox: ReturnType<typeof useMailbox>;
   waiting: Row[];
+  openings: Row[];
   readError: string;
   loading: boolean;
   negotiations: Negotiation[];
@@ -261,21 +264,31 @@ function Rail({
       <div>
         <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Needs you
-          {waiting.length > 0 && (
+          {/* Openings count too. A drafted email nobody has read is a thing
+              waiting on a person exactly as much as a quote is, and it is the
+              one the producer will not go looking for — the agent writes it
+              while they are elsewhere. */}
+          {waiting.length + openings.length > 0 && (
             <span className="ml-2 rounded-full bg-foreground px-1.5 py-0.5 text-xs text-background">
-              {waiting.length}
+              {waiting.length + openings.length}
             </span>
           )}
         </p>
         {loading ? (
           <SkeletonRows rows={2} className="mt-1" />
-        ) : waiting.length === 0 ? (
+        ) : waiting.length + openings.length === 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">
             Nothing is waiting on a decision. The agent stops here every time,
             so this filling in is how you find out.
           </p>
         ) : (
           <div className="mt-1 space-y-2">
+            {openings.length > 0 && (
+              <p className="rounded-md border px-2 py-1.5 text-xs">
+                {openings.length === 1 ? "An opening email is" : "Opening emails are"}{" "}
+                waiting to be read, in the thread.
+              </p>
+            )}
             {waiting.map((row) =>
               row.kind === "decision" ? (
                 <Decision

@@ -126,12 +126,43 @@ export interface PropsRow {
   at: Date;
 }
 
+/**
+ * One opening email, written and waiting to be read.
+ *
+ * A type alias rather than an interface, and not a style choice: an interface
+ * has no index signature, so it does not satisfy assistant-ui's
+ * `ReadonlyJSONValue` and cannot be carried as a tool-call argument. `Prop` is
+ * declared this way for exactly the same reason.
+ */
+export type PendingOpening = {
+  negotiationId: string;
+  supplier: string;
+  itemName: string;
+  subject: string;
+  body: string;
+};
+
+/**
+ * The opening emails, held before first contact.
+ *
+ * One row for the whole batch rather than one per email, for the same reason
+ * the props arrive as a single list: they are approved together, and a column
+ * of separate Send buttons invites sending half of them.
+ */
+export interface OpeningsRow {
+  kind: "openings";
+  id: string;
+  openings: PendingOpening[];
+  at: Date;
+}
+
 export type Row =
   | ProducerRow
   | BriefingRow
   | ActivityRow
   | DecisionRow
-  | PropsRow;
+  | PropsRow
+  | OpeningsRow;
 
 /**
  * Oldest first, by when each thing actually happened.

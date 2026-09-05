@@ -49,7 +49,11 @@ works in demo mode" is never evidence that it works.
 ## How the pieces fit
 
 ```
-screenplay ──> extract_props ──> research_item ──> negotiate over Gmail
+screenplay ──> extract_props ──> research_item ──> draft the opening email
+                                                          │
+                                                   a person reads it
+                                                          │
+                                                 negotiate over Gmail
                                                           │
                                                     READY_FOR_HUMAN
                                                           │
@@ -57,6 +61,9 @@ screenplay ──> extract_props ──> research_item ──> negotiate over Gm
                                                           │
                                                        ORDERED
 ```
+
+Two of those arrows wait on a human: before the first word to a stranger, and
+before any money. Everything between them runs on its own, for days.
 
 ## Ownership
 
@@ -183,14 +190,32 @@ a restricted scope, so publishing forces Google's verification plus a CASA
 security assessment. Re-auth weekly is the strategy, not the fallback. See
 `docs/oauth-runbook.md`.
 
-## The stop condition
+## The stop conditions
 
-The agent stops at `READY_FOR_HUMAN`. Always. No exceptions, no config flag, no
-"auto-approve under RM500." `ORDERED` is the only state that writes a purchase
-order, and it is reachable only through the human-authenticated endpoint.
+There are two, at the two moments the agent would otherwise act in a person's
+name without them.
+
+**Before it spends.** The agent stops at `READY_FOR_HUMAN`. Always. No
+exceptions, no config flag, no "auto-approve under RM500." `ORDERED` is the only
+state that writes a purchase order, and it is reachable only through the
+human-authenticated endpoint.
 
 Confusing or unparseable supplier replies escalate to `READY_FOR_HUMAN` too. An
 agent that guesses at an ambiguous quote is worse than one that asks.
+
+**Before it speaks to a stranger.** The opening email of every negotiation is
+written and held. `DRAFTED` with `opening_released_at` unset means composed and
+not sent; the producer reads it, edits it if they want, and releases it. That
+first message goes from their mailbox over their name, and a model wrote it.
+
+Only the opening. Every later round — counters, chases, the reply that comes
+back on day four — runs unattended, because a gate on each of those would mean
+a five-day negotiation stalls on whether somebody is at their desk, and running
+while nobody watches is the thing this system is for.
+
+The stored draft is what gets sent, not whatever the brain would say on the tick
+that finally posts it. Re-asking there would leave the edit box working
+perfectly and changing nothing.
 
 ## Not in scope yet
 

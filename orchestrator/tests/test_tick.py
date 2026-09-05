@@ -97,7 +97,17 @@ class _Harness:
         due: datetime | None = None,
         floor: Money | None = None,
         thread_id: str = "",
+        approved: bool = True,
     ) -> None:
+        """A negotiation ready to run.
+
+        ``approved`` defaults to True — the opening already released by a
+        person — because almost every test below is about what happens *after*
+        first contact: threading, counters, quotes, chasing, escalation. The
+        gate itself is tested by the handful of tests that pass False, and
+        making the rest of the file walk through it would bury what they are
+        each actually checking.
+        """
         await self.repo.save_negotiation(
             PID,
             negotiation_id,
@@ -108,6 +118,7 @@ class _Harness:
                 floor_price=floor,
                 gmail_thread_id=thread_id,
                 next_action_due_at=due if due is not None else T0,
+                opening_released_at=T0 if approved else None,
                 created_at=T0,
                 updated_at=T0,
             ),
@@ -920,3 +931,115 @@ async def test_a_network_failure_is_not_blamed_on_the_producer(
 
     with pytest.raises(TimeoutError):
         _ = await loop.run_tick(PID)
+
+
+# --------------------------------------------------------------------------- #
+# The opening gate
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_unapproved_opening_is_written_and_not_sent(
+    harness: _Harness,
+) -> None:
+    """The gate, and the assertion that matters is the one about zero emails.
+
+    A model wrote the first message to a stranger, from this producer's mailbox
+    and over their name. Before this it went out before they saw it.
+    """
+    await harness.add_negotiation(approved=False)
+
+    report = await harness.loop.run_tick(PID)
+
+    assert report.messages_sent == 0, "nobody was emailed"
+    assert harness.mail.sent == [], "really nobody"
+    assert report.openings_drafted == 1
+
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert "SkyPanel" in record.draft_body, "but it was written and kept"
+    assert record.draft_subject != ""
+    assert record.state is NegotiationState.DRAFTED
+
+
+async def test_a_waiting_draft_is_parked_rather_than_reconsidered(
+    harness: _Harness,
+) -> None:
+    """A draft is not late — it is waiting on a person.
+
+    With a due time still set, every tick would re-decide this row for as long
+    as the producer takes to read it, burning a brain call a minute.
+    """
+    await harness.add_negotiation(approved=False)
+
+    _ = await harness.loop.run_tick(PID)
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert record.next_action_due_at is None
+
+    second = await harness.loop.run_tick(PID)
+    assert second.openings_drafted == 0, "not picked up again"
+    assert second.messages_sent == 0
+
+
+async def test_approving_sends_the_producers_words_not_the_brains(
+    harness: _Harness,
+) -> None:
+    """The whole point of the edit box.
+
+    If the tick re-asked the brain at send time and mailed that, editing would
+    look like it worked and change nothing — the exact shape of bug this
+    codebase keeps turning up.
+    """
+    await harness.add_negotiation(approved=False)
+    _ = await harness.loop.run_tick(PID)
+
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    assert "SkyPanel" in record.draft_body, "the brain's version, before editing"
+    record.draft_subject = "About that light"
+    record.draft_body = "Rewritten by the producer entirely."
+    record.opening_released_at = T0
+    record.next_action_due_at = T0
+    await harness.repo.save_negotiation(PID, "neg1", record)
+
+    report = await harness.loop.run_tick(PID)
+
+    assert report.messages_sent == 1
+    sent = harness.mail.last_sent()
+    assert sent is not None
+    assert sent["body"] == "Rewritten by the producer entirely."
+    assert sent["subject"] == "About that light"
+    assert "SkyPanel" not in sent["body"], "the brain's draft did not come back"
+
+
+async def test_the_draft_does_not_come_back_as_a_counter_offer(
+    harness: _Harness,
+) -> None:
+    """COUNTER and CHASE travel the same send path as the opening.
+
+    A draft left lying on the record would eventually go out as somebody's
+    counter-offer, which reads to a supplier as an agent that has lost its
+    place in the conversation.
+    """
+    await harness.add_negotiation(floor=Money(amount=900), approved=False)
+    _ = await harness.loop.run_tick(PID)
+
+    record = await harness.repo.get_negotiation(PID, "neg1")
+    assert record is not None
+    record.opening_released_at = T0
+    record.next_action_due_at = T0
+    await harness.repo.save_negotiation(PID, "neg1", record)
+    _ = await harness.loop.run_tick(PID)
+
+    thread = harness.mail.sent[0]["thread_id"]
+    _ = harness.mail.deliver(thread_id=thread, body="We can do RM1,250 per day.")
+    await harness.at(T0 + timedelta(hours=6))
+    _ = await harness.loop.run_tick(PID)
+
+    assert len(harness.mail.sent) == 2, "opening, then a counter"
+    counter = harness.mail.sent[1]
+    assert counter["body"] != harness.mail.sent[0]["body"]
+
+    settled = await harness.repo.get_negotiation(PID, "neg1")
+    assert settled is not None
+    assert settled.draft_body == "", "cleared once the opening had gone"

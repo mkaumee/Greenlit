@@ -269,6 +269,9 @@ def test_this_service_cannot_spend_money() -> None:
     """
     paths = [getattr(route, "path", "") for route in app.routes]
 
+    # "approve" is reserved for money in this codebase, which is why releasing
+    # the opening emails is /openings/release rather than /openings/approve —
+    # this assertion is what caught that naming and it was right to.
     assert not [p for p in paths if "approve" in p or "purchase" in p], paths
     assert "orders" not in set(ApiServices.__dataclass_fields__)
     assert "orders_client" not in set(ApiServices.__dataclass_fields__)
@@ -1094,3 +1097,139 @@ async def test_a_closed_deployment_refuses_to_enrol(
 
     assert refused.status_code == 403
     assert "grant_producer" in refused.text, "and says how to get in anyway"
+
+
+# --------------------------------------------------------------------------- #
+# Reading the opening emails before they go
+# --------------------------------------------------------------------------- #
+
+
+async def _pending_opening(
+    firestore: AsyncClient, project_id: str, negotiation_id: str = "neg1"
+) -> FirestoreRepository:
+    repo = FirestoreRepository(firestore)
+    await repo.save_negotiation(
+        project_id,
+        negotiation_id,
+        NegotiationRecord(
+            item_id="mirror",
+            supplier_id="sup1",
+            state=NegotiationState.DRAFTED,
+            draft_subject="Hire enquiry",
+            draft_body="Hi, do you hire mirrors?",
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    return repo
+
+
+async def test_an_opening_can_be_rewritten_before_it_goes(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    headers = _auth(tokens)
+    project_id = await _start(api, headers)
+    repo = await _pending_opening(firestore, project_id)
+
+    reply = await api.patch(
+        f"/projects/{project_id}/negotiations/neg1/opening",
+        headers=headers,
+        json={"subject": "About a mirror", "body": "Rewritten by a person."},
+    )
+
+    assert reply.status_code == 200, reply.text
+    record = await repo.get_negotiation(project_id, "neg1")
+    assert record is not None
+    assert record.draft_body == "Rewritten by a person."
+    assert record.opening_released_at is None, "editing does not send it"
+    assert record.next_action_due_at is None, "and does not make it due"
+
+
+async def test_approving_makes_the_opening_due_without_sending_it(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """This service holds no mailbox and sends nothing.
+
+    Approval writes the intent; the tick service does the posting. Same split
+    that keeps this one unable to write a purchase order.
+    """
+    headers = _auth(tokens)
+    project_id = await _start(api, headers)
+    repo = await _pending_opening(firestore, project_id)
+
+    reply = await api.post(
+        f"/projects/{project_id}/openings/release", headers=headers, json={}
+    )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["approved"] == ["neg1"]
+    record = await repo.get_negotiation(project_id, "neg1")
+    assert record is not None
+    assert record.opening_released_at is not None
+    assert record.next_action_due_at is not None
+    assert record.state is NegotiationState.DRAFTED, "still unsent until a tick runs"
+
+
+async def test_an_approved_opening_can_no_longer_be_edited(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """An edit box over a message already on its way is a promise the screen
+    cannot keep."""
+    headers = _auth(tokens)
+    project_id = await _start(api, headers)
+    _ = await _pending_opening(firestore, project_id)
+    _ = await api.post(
+        f"/projects/{project_id}/openings/release", headers=headers, json={}
+    )
+
+    late = await api.patch(
+        f"/projects/{project_id}/negotiations/neg1/opening",
+        headers=headers,
+        json={"subject": "Too late", "body": "Too late."},
+    )
+
+    assert late.status_code == 409
+
+
+async def test_an_empty_opening_is_refused(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    """Empty has to keep meaning "never written".
+
+    The tick falls back to the brain's text when the stored draft is empty, so
+    saving a cleared box here would mail the very version the producer deleted.
+    """
+    headers = _auth(tokens)
+    project_id = await _start(api, headers)
+    _ = await _pending_opening(firestore, project_id)
+
+    reply = await api.patch(
+        f"/projects/{project_id}/negotiations/neg1/opening",
+        headers=headers,
+        json={"subject": "Still here", "body": ""},
+    )
+
+    assert reply.status_code == 422
+
+
+async def test_a_stranger_cannot_read_or_release_an_opening(
+    api: httpx.AsyncClient, firestore: AsyncClient, tokens: TokenMinter
+) -> None:
+    _ = await _owned_project(firestore, "someone-elses", "a-different-producer")
+    repo = await _pending_opening(firestore, "someone-elses")
+    headers = _auth(tokens, "outsider@example.invalid")
+
+    edited = await api.patch(
+        "/projects/someone-elses/negotiations/neg1/opening",
+        headers=headers,
+        json={"subject": "Mine", "body": "Mine."},
+    )
+    approved = await api.post(
+        "/projects/someone-elses/openings/release", headers=headers, json={}
+    )
+
+    assert edited.status_code == approved.status_code == 404
+    record = await repo.get_negotiation("someone-elses", "neg1")
+    assert record is not None
+    assert record.opening_released_at is None, "nothing was released"
+    assert record.draft_body == "Hi, do you hire mirrors?", "and nothing was rewritten"

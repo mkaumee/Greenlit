@@ -330,6 +330,7 @@ class TickResult(BaseModel):
     negotiations_examined: int
     claims_lost: int
     messages_sent: int
+    openings_drafted: int
     escalated: int
     errors: list[str]
 
@@ -348,6 +349,7 @@ class TickResult(BaseModel):
             negotiations_examined=report.negotiations_examined,
             claims_lost=report.claims_lost,
             messages_sent=report.messages_sent,
+            openings_drafted=report.openings_drafted,
             escalated=report.escalated,
             errors=report.errors,
         )

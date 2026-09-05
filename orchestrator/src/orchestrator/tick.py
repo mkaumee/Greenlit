@@ -120,6 +120,13 @@ class TickReport:
     """Rows another tick was already working on. Zero unless ticks overlap, and
     a number that climbs is the signal that ticks are running long."""
     messages_sent: int = 0
+    openings_drafted: int = 0
+    """Opening emails written and left for a person to read.
+
+    Distinct from `messages_sent` on purpose: a tick that drafted five and sent
+    none is working exactly as intended, and one number covering both would
+    make that indistinguishable from a tick that mailed five strangers.
+    """
     escalated: int = 0
     mailbox_missing: bool = False
     """No mailbox to send from, so negotiations were left where they were.
@@ -448,6 +455,44 @@ class TickLoop:
                 report.errors.append(f"{due.negotiation_id}: supplier record vanished")
                 return
 
+            opening = move.action is MoveAction.SEND_OPENING
+            if opening and record.opening_released_at is None:
+                # The gate. A model has written the first message to a stranger,
+                # from this producer's mailbox and over their name, and until
+                # now it went out before they saw it. Park the draft and stop.
+                #
+                # `next_action_due_at` is cleared rather than pushed forward: a
+                # draft is not late, it is waiting on a person, and a due time
+                # would have this row re-decided every sixty seconds for as long
+                # as they take. Approving is what makes it due again.
+                record.draft_subject = (
+                    move.draft_subject or f"Regarding {record.item_id}"
+                )
+                record.draft_body = move.draft_body
+                record.next_action_due_at = None
+                record.updated_at = now
+                await self._repo.save_negotiation(
+                    due.project_id, due.negotiation_id, record
+                )
+                report.openings_drafted += 1
+                return
+
+            # What actually goes out. For an approved opening it is the stored
+            # draft, because the producer may have rewritten it — re-asking the
+            # brain here and sending that instead would leave the edit box
+            # working perfectly and changing nothing. Every later round uses the
+            # brain's fresh text, which is the only thing it can use.
+            #
+            # The fallback covers an approved opening with nothing stored, which
+            # means the draft step never ran rather than that somebody cleared
+            # the box: the API refuses to save an empty subject or body, so
+            # empty here is only ever "never written". Without this, that case
+            # mails a stranger a blank message.
+            subject = (record.draft_subject if opening else "") or (
+                move.draft_subject or f"Regarding {record.item_id}"
+            )
+            body = (record.draft_body if opening else "") or move.draft_body
+
             # Threading is built from RFC-822 header ids, never from the
             # transport's own message id. See SentMessage in mail.py for why
             # confusing the two silently shreds the supplier's thread.
@@ -459,8 +504,8 @@ class TickLoop:
             # same pass either way, and recording it twice would be noise.
             sent = await mail.send(
                 to=supplier.email,
-                subject=move.draft_subject or f"Regarding {record.item_id}",
-                body=move.draft_body,
+                subject=subject,
+                body=body,
                 thread_id=record.gmail_thread_id,
                 in_reply_to=record.last_rfc822_id,
                 references=_references(record),
@@ -479,12 +524,17 @@ class TickLoop:
                 sent.message_id,
                 MessageRecord(
                     direction=MessageDirection.OUTBOUND,
-                    body=move.draft_body,
-                    subject=move.draft_subject,
+                    body=body,
+                    subject=subject,
                     sim_sent_at=now,
                     gmail_message_id=sent.message_id,
                 ),
             )
+
+            # COUNTER and CHASE share this path, so a draft left lying here
+            # would eventually be sent as somebody's counter-offer.
+            record.draft_subject = ""
+            record.draft_body = ""
 
             if move.action is MoveAction.COUNTER:
                 record.rounds_used += 1

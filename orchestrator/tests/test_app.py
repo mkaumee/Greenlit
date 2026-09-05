@@ -91,6 +91,12 @@ async def _seed(repo: FirestoreRepository, project_id: str) -> None:
             supplier_id="sup1",
             state=NegotiationState.DRAFTED,
             next_action_due_at=T0,
+            # Its opening already released by a person. These tests are about
+            # the tick endpoint — that it covers every project, aims at one,
+            # and survives a broken neighbour — and walking each of them
+            # through the opening gate would bury that. The gate has its own
+            # tests in test_tick.py.
+            opening_released_at=T0,
             created_at=T0,
             updated_at=T0,
         ),

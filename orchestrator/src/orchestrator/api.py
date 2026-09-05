@@ -46,7 +46,7 @@ from datetime import timedelta
 from typing import Annotated
 from urllib.parse import urlencode
 
-from cinema_contracts import AgentBrain, Money, ScriptSource
+from cinema_contracts import AgentBrain, Money, NegotiationState, ScriptSource
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -72,7 +72,12 @@ from orchestrator.gmail import (
     producer_token_store,
 )
 from orchestrator.logs import configure_logging
-from orchestrator.records import MailboxRecord, MailboxStatus, ProjectRecord
+from orchestrator.records import (
+    MailboxRecord,
+    MailboxStatus,
+    NegotiationRecord,
+    ProjectRecord,
+)
 from orchestrator.repository import FirestoreRepository
 from orchestrator.scripts import (
     PDF_MIME,
@@ -486,6 +491,32 @@ class Enrolled(BaseModel):
     email: str
 
 
+class Draft(BaseModel):
+    negotiation_id: str
+    subject: str
+    body: str
+
+
+class EditOpening(BaseModel):
+    subject: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1)
+    """Neither may be emptied.
+
+    An empty stored draft has to keep meaning "never written" — the tick falls
+    back to the brain's text when it sees one, so accepting a cleared box here
+    would silently mail the version the producer just deleted.
+    """
+
+
+class ReleaseOpenings(BaseModel):
+    negotiation_ids: list[str] = Field(default_factory=list)
+    """Empty means every opening still waiting on this production."""
+
+
+class OpeningsReleased(BaseModel):
+    approved: list[str]
+
+
 class RenameProject(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
@@ -684,6 +715,97 @@ async def confirm_items(
         },
     )
     return ItemsConfirmed(confirmed=result.confirmed, abandoned=result.abandoned)
+
+
+def _is_pending_opening(record: NegotiationRecord) -> bool:
+    """An opening written, not released, and not yet gone."""
+    return (
+        record.state is NegotiationState.DRAFTED
+        and record.opening_released_at is None
+        and record.draft_body != ""
+    )
+
+
+@app.patch("/projects/{project_id}/negotiations/{negotiation_id}/opening")
+async def edit_opening(
+    request: Request,
+    project_id: str,
+    negotiation_id: str,
+    body: EditOpening,
+    producer: Signed,
+) -> Draft:
+    """Rewrite an opening email before it goes.
+
+    Refused once the opening has been released or the negotiation has moved on.
+    An edit box over a message already in somebody's inbox is a promise the
+    screen cannot keep, and letting it appear to succeed is worse than not
+    offering it.
+    """
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    record = await services.repo.get_negotiation(project_id, negotiation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no negotiation {negotiation_id}")
+    if not _is_pending_opening(record):
+        raise HTTPException(
+            status_code=409,
+            detail="that opening has already been sent or approved for sending.",
+        )
+
+    record.draft_subject = body.subject
+    record.draft_body = body.body
+    record.updated_at = await services.clock.now(project_id)
+    await services.repo.save_negotiation(project_id, negotiation_id, record)
+    return Draft(
+        negotiation_id=negotiation_id,
+        subject=record.draft_subject,
+        body=record.draft_body,
+    )
+
+
+@app.post("/projects/{project_id}/openings/release")
+async def release_openings(
+    request: Request, project_id: str, body: ReleaseOpenings, producer: Signed
+) -> OpeningsReleased:
+    """Release the opening emails. This is what puts them in the post.
+
+    Nothing is sent here. Approval writes the intent and makes the row due; the
+    tick service holds the mailbox and does the sending. That split is the same
+    one that keeps this service unable to write a purchase order, and it is
+    worth not eroding for convenience.
+    """
+    services = services_of(request)
+    _ = await _owned(services, project_id, producer)
+
+    now = await services.clock.now(project_id)
+    wanted = set(body.negotiation_ids)
+    approved: list[str] = []
+
+    for negotiation_id, record in (
+        await services.repo.list_negotiations(project_id)
+    ).items():
+        if wanted and negotiation_id not in wanted:
+            continue
+        if not _is_pending_opening(record):
+            continue
+        record.opening_released_at = now
+        # Due immediately: approving is the producer saying send it, and a
+        # delay would read as the agent ignoring them.
+        record.next_action_due_at = now
+        record.updated_at = now
+        await services.repo.save_negotiation(project_id, negotiation_id, record)
+        approved.append(negotiation_id)
+
+    log.info(
+        "openings approved",
+        extra={
+            "project_id": project_id,
+            "uid": producer.uid,
+            "approved": len(approved),
+        },
+    )
+    return OpeningsReleased(approved=approved)
 
 
 @app.post("/producers/me")

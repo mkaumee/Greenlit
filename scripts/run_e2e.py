@@ -208,7 +208,31 @@ async def seed_from_screenplay(api: httpx.AsyncClient) -> int:
     return 0
 
 
-async def drive(api: httpx.AsyncClient, clock: SimClock, mail: InMemoryMailbox) -> None:
+async def release_openings(repo: FirestoreRepository, now: datetime) -> int:
+    """Stand in for a producer reading the drafts and pressing send.
+
+    Exactly what `POST /projects/{pid}/openings/release` writes: the approval
+    stamp and a due time. Nothing here composes or sends — the next tick does
+    that, which is the half worth proving.
+    """
+    released = 0
+    for negotiation_id, record in (await repo.list_negotiations(PID)).items():
+        if record.opening_released_at is not None or record.draft_body == "":
+            continue
+        record.opening_released_at = now
+        record.next_action_due_at = now
+        record.updated_at = now
+        await repo.save_negotiation(PID, negotiation_id, record)
+        released += 1
+    return released
+
+
+async def drive(
+    api: httpx.AsyncClient,
+    clock: SimClock,
+    mail: InMemoryMailbox,
+    repo: FirestoreRepository,
+) -> None:
     """Advance simulated time, ticking and letting the sellers answer."""
     by_email = {p.email: p for p in PERSONAS}
     rounds: dict[str, int] = {}
@@ -219,9 +243,25 @@ async def drive(api: httpx.AsyncClient, clock: SimClock, mail: InMemoryMailbox) 
         _ = await clock.set_sim_now(PID, moment)
         report = (await api.post("/tick")).json()["projects"][0]
 
+        # The producer reads the opening emails and releases them. Not a
+        # workaround for the gate — it is the gate, exercised: nothing reaches
+        # a supplier in this run without something standing in for a person
+        # pressing send, which is the behaviour the product now promises.
+        #
+        # Written through the repository rather than posted, because the route
+        # that does this belongs to `cinema-api` and this harness drives the
+        # tick service. Same two fields either way.
+        if report["openings_drafted"]:
+            released = await release_openings(repo, moment)
+            print(
+                f"  t+{tick * HOURS_PER_TICK:>3}h  producer released "
+                f"{released} opening email(s)"
+            )
+
         interesting = (
             "items_researched",
             "negotiations_opened",
+            "openings_drafted",
             "messages_sent",
             "replies_filed",
             "escalated",
@@ -231,6 +271,7 @@ async def drive(api: httpx.AsyncClient, clock: SimClock, mail: InMemoryMailbox) 
                 f"  t+{tick * HOURS_PER_TICK:>3}h  "
                 f"researched={report['items_researched']} "
                 f"opened={report['negotiations_opened']} "
+                f"drafted={report['openings_drafted']} "
                 f"sent={report['messages_sent']} "
                 f"filed={report['replies_filed']} "
                 f"escalated={report['escalated']}"
@@ -365,7 +406,7 @@ async def run() -> int:
     try:
         if (code := await seed_from_screenplay(api)) != 0:
             return code
-        await drive(api, clock, mail)
+        await drive(api, clock, mail, repo)
         return await verify(repo, orders, mail)
     finally:
         await api.aclose()

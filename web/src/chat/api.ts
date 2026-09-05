@@ -288,6 +288,45 @@ export async function deleteProject(projectId: string): Promise<Done> {
  * answers 403 and the right thing is to carry on and let the next call say so
  * properly, rather than block sign-in behind a message about a role.
  */
+/**
+ * Rewrite an opening email before it goes.
+ *
+ * Refused once the opening has been released — an edit box over a message
+ * already in somebody's inbox is a promise the screen cannot keep, so the
+ * server says 409 and the component stops offering it.
+ */
+export async function editOpening(
+  projectId: string,
+  negotiationId: string,
+  subject: string,
+  body: string,
+): Promise<Done> {
+  return completed(
+    await send("PATCH", `/projects/${projectId}/negotiations/${negotiationId}/opening`, {
+      subject,
+      body,
+    }),
+  );
+}
+
+/**
+ * Release the opening emails. This is the press-send.
+ *
+ * Nothing is sent by this call: it marks them approved and due, and the tick
+ * service — which is the one holding the mailbox — posts them within the
+ * minute. An empty list means every opening still waiting.
+ */
+export async function releaseOpenings(
+  projectId: string,
+  negotiationIds: string[] = [],
+): Promise<Done> {
+  return completed(
+    await send("POST", `/projects/${projectId}/openings/release`, {
+      negotiation_ids: negotiationIds,
+    }),
+  );
+}
+
 export async function enrolAsProducer(): Promise<Done> {
   const reply = await send("POST", "/producers/me");
   const result = await completed(reply);

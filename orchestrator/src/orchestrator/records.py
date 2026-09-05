@@ -250,6 +250,28 @@ class NegotiationRecord(_Record):
     latest_reasoning: str = ""
     """The brain's last explanation, shown on the item detail screen."""
 
+    draft_subject: str = ""
+    draft_body: str = ""
+    """The opening email, written and waiting for a person to read it.
+
+    Filled by the tick when the brain first says SEND_OPENING, and *not sent*
+    until ``opening_released_at`` is set. The producer may rewrite either field
+    first — this is the copy that goes out, not whatever the brain would say on
+    the tick that finally sends it. A model wrote the first message to a
+    stranger, from their mailbox, in their name; they should get to read it.
+
+    Cleared once the opening has gone, because COUNTER and CHASE travel the
+    same send path and must never inherit a stale opening.
+    """
+
+    opening_released_at: datetime | None = None
+    """When a person released the opening email. Simulated time, per Rule 2.
+
+    ``None`` means the draft above is still waiting. Only the opening is gated:
+    every later round runs unattended over days, which is the thing this system
+    is actually claiming to do.
+    """
+
     created_at: datetime
     updated_at: datetime
 
